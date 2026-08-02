@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: im-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-invest}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invest}
+      POSTGRES_DB: ${POSTGRES_DB:-invest}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-invest} -d ${POSTGRES_DB:-invest}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: im-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-invest}:${POSTGRES_PASSWORD:-invest}@db:5432/${POSTGRES_DB:-invest}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      QUOTE_POLL_SECONDS: ${QUOTE_POLL_SECONDS:-15}
+      QUOTE_PROVIDER: ${QUOTE_PROVIDER:-moex}
+      TINVEST_TOKEN: ${TINVEST_TOKEN:-}
+      RISK_FREE_RATE: ${RISK_FREE_RATE:-0.16}
+      SYNC_ON_STARTUP: ${SYNC_ON_STARTUP:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # код примонтирован для разработки: правки подхватываются рестартом контейнера
+      - ./backend:/app
+
+volumes:
+  pgdata:
