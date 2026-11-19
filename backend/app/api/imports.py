@@ -53,9 +53,11 @@ async def preview_import(db: DB, file: UploadFile = File(...)):
     except ImportError_ as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    known_secids = {
-        a.secid for a in (await db.scalars(select(Asset.secid).where(Asset.secid.in_(result.symbols)))).all()
-    }
+    known_secids = set(
+        (await db.scalars(
+            select(Asset.secid).where(Asset.secid.in_(result.symbols))
+        )).all()
+    )
     existing_ids = set(
         (
             await db.scalars(
