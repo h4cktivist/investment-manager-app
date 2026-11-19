@@ -19,9 +19,21 @@ class Settings(BaseSettings):
     risk_free_rate: float = 0.16          # доля годовых, 0.16 == 16%
     trading_days_per_year: int = 252
 
+    # Макроэкономика на дашборде (ЦБ РФ + MOEX ISS, без ключей)
+    macro_enabled: bool = True
+    macro_cache_minutes: int = 180
+    macro_cbr_base: str = "https://cbr.ru"  # без www: www.cbr.ru закрыт DDoS-Guard
+    macro_ofz_tenor: float = 10.0            # срок ОФЗ для основной карточки, лет
+
     # Фоновые задачи
     sync_on_startup: bool = True
     history_sync_hour: int = 20           # МСК, ежедневная догрузка истории
+
+    # Автоматическое зачисление купонов, амортизаций и погашений в сделки
+    auto_post_payments: bool = True
+    #: на сколько дней назад «догоняем» выплаты после простоя приложения
+    auto_post_lookback_days: int = 45
+    auto_post_interval_minutes: int = 60
 
     moex_iss_base: str = "https://iss.moex.com/iss"
     http_timeout: float = 20.0

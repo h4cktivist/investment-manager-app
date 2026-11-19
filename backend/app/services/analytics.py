@@ -11,7 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.enums import AssetClass, PaymentKind
-from app.models import Asset, Benchmark, BenchmarkPrice, PaymentSchedule, Portfolio, Quote
+from app.models import (
+    Asset,
+    Benchmark,
+    BenchmarkPrice,
+    PaymentSchedule,
+    Portfolio,
+    PriceHistory,
+    Quote,
+)
 from app.services.portfolio import upcoming_payments_for_holdings
 from app.services import bond_math, metrics as m
 from app.services.moex import normalize_price
@@ -41,6 +49,13 @@ PERIODS = {
 
 #: на сколько дней заглядываем назад за стоимостью портфеля на начало периода
 LOOKBACK_DAYS = 14
+#: для корреляций нужен запас цены перед началом периода, чтобы посчитать
+#: доходность первого дня окна
+CORRELATION_LOOKBACK_DAYS = 14
+#: меньше 10 общих доходностей — корреляция на таком окне не имеет смысла
+CORRELATION_MIN_RETURNS = 10
+#: больше 15 бумаг матрица перестаёт читаться на экране
+CORRELATION_MAX_ASSETS = 15
 
 ASSET_CLASS_LABELS = {
     "SHARE": "Акции",
@@ -356,10 +371,177 @@ class PortfolioAnalytics:
         data["excess_return"] = (
             bundle.twr - bench_total if bench_total is not None else None
         )
-        for key in ("start", "end", "max_drawdown_start", "max_drawdown_end"):
+        for key in (
+            "start",
+            "end",
+            "max_drawdown_start",
+            "max_drawdown_end",
+            "worst_day_date",
+            "best_day_date",
+        ):
             if data.get(key):
                 data[key] = data[key].isoformat()
         return data
+
+    # ------------------------------------------------------- корреляция активов
+
+    async def correlation_matrix(
+        self, period: str = "ALL", max_assets: int = CORRELATION_MAX_ASSETS
+    ) -> dict:
+        """Попарная корреляция и ковариация дневных доходностей открытых позиций.
+
+        Доходности считаются по чистым ценам: у облигаций грязная цена прыгает
+        вниз на купонной дате, и такая «доходность» исказила бы корреляцию.
+        Цена протягивается вперёд на общей сетке торговых дней Мосбиржи, поэтому
+        бумаги с разной историей и пропусками торгов сопоставимы по датам.
+        """
+        first = self.ledger.start_date
+        if first is None:
+            return {"available": False, "reason": "нет сделок"}
+
+        start = period_start(period, first) or first
+        end = date.today()
+
+        positions = [
+            p
+            for p in self.positions()
+            if p["is_open"]
+            and p["has_market_price"]
+            and not p["is_custom"]
+            and p["market_value"] > EPS
+        ]
+        if len(positions) < 2:
+            return {
+                "available": False,
+                "reason": "нужны минимум две открытые позиции с рыночной ценой",
+            }
+
+        positions.sort(key=lambda p: -p["market_value"])
+        total_assets = len(positions)
+        limit = max(2, min(max_assets, 30))
+        selected = positions[:limit]
+        asset_ids = [p["asset_id"] for p in selected]
+
+        lookback = max(start - timedelta(days=CORRELATION_LOOKBACK_DAYS), first)
+        trading = await self.trading_days(lookback, end)
+        if trading:
+            grid = sorted(day for day in trading if lookback <= day <= end)
+        else:
+            # бенчмарк ещё не подгрузился — берём объединение дат истории цен
+            date_rows = await self.session.execute(
+                select(PriceHistory.date)
+                .where(
+                    PriceHistory.asset_id.in_(asset_ids),
+                    PriceHistory.date >= lookback,
+                    PriceHistory.date <= end,
+                )
+                .distinct()
+            )
+            grid = sorted({row[0] for row in date_rows})
+        if not grid:
+            return {"available": False, "reason": "нет истории цен за период"}
+
+        price_rows = await self.session.execute(
+            select(
+                PriceHistory.asset_id,
+                PriceHistory.date,
+                PriceHistory.close_norm,
+            )
+            .where(
+                PriceHistory.asset_id.in_(asset_ids),
+                PriceHistory.date >= lookback,
+                PriceHistory.date <= end,
+            )
+            .order_by(PriceHistory.asset_id, PriceHistory.date)
+        )
+        prices: dict[int, list[tuple[date, float]]] = defaultdict(list)
+        for asset_id, day, close in price_rows:
+            value = f(close)
+            if value > EPS:
+                prices[asset_id].append((day, value))
+
+        by_id = {p["asset_id"]: p for p in selected}
+        returns: dict[int, list[tuple[date, float]]] = {}
+        included: list[dict] = []
+        for asset_id in asset_ids:
+            series = _returns_on_grid(prices.get(asset_id, []), grid)
+            series = [(day, value) for day, value in series if day >= start]
+            if len(series) < CORRELATION_MIN_RETURNS:
+                continue
+            position = by_id[asset_id]
+            returns[asset_id] = series
+            included.append(
+                {
+                    "asset_id": asset_id,
+                    "secid": position["secid"],
+                    "name": position["name"],
+                    "asset_class": position["asset_class"],
+                    "asset_class_label": position["asset_class_label"],
+                    "weight": position["weight"],
+                    "market_value": position["market_value"],
+                    "observations": len(series),
+                    "volatility": m.volatility([value for _, value in series]),
+                }
+            )
+
+        if len(included) < 2:
+            return {
+                "available": False,
+                "reason": (
+                    "нужны минимум две бумаги с историей "
+                    f"от {CORRELATION_MIN_RETURNS} торговых дней"
+                ),
+            }
+
+        maps = {item["asset_id"]: dict(returns[item["asset_id"]]) for item in included}
+        count = len(included)
+        matrix: list[list[float | None]] = [[None] * count for _ in range(count)]
+        pairs: list[dict] = []
+        for i in range(count):
+            matrix[i][i] = 1.0
+            left = maps[included[i]["asset_id"]]
+            for j in range(i + 1, count):
+                right = maps[included[j]["asset_id"]]
+                common = sorted(set(left) & set(right))
+                if len(common) < CORRELATION_MIN_RETURNS:
+                    continue
+                stats = m.pair_statistics(
+                    [left[day] for day in common],
+                    [right[day] for day in common],
+                )
+                if stats is None:
+                    continue
+                matrix[i][j] = matrix[j][i] = stats["correlation"]
+                pairs.append(
+                    {
+                        "i": i,
+                        "j": j,
+                        "correlation": stats["correlation"],
+                        "covariance": stats["covariance"],
+                        "covariance_annual": stats["covariance_annual"],
+                        # проценты в квадрате: 0,84 %² понятнее, чем 0,000084
+                        "covariance_pct2": stats["covariance"] * 10_000,
+                        "covariance_annual_pct2": stats["covariance_annual"] * 10_000,
+                        "observations": stats["observations"],
+                        "start": common[0].isoformat(),
+                        "end": common[-1].isoformat(),
+                    }
+                )
+
+        return {
+            "available": True,
+            "period": period,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "method": "дневные доходности чистых цен на общей сетке торговых дней",
+            "assets": included,
+            "correlation": matrix,
+            "pairs": pairs,
+            "total_assets": total_assets,
+            "truncated": total_assets > len(selected),
+            "excluded_no_history": len(selected) - len(included),
+            "min_observations": CORRELATION_MIN_RETURNS,
+        }
 
     async def performance_chart(
         self, period: str = "ALL", benchmark_codes: list[str] | None = None
@@ -649,6 +831,31 @@ class PortfolioAnalytics:
 
     def open_quantities(self) -> dict[int, float]:
         return {aid: p.qty for aid, p in self.ledger.positions.items() if p.qty > EPS}
+
+
+def _returns_on_grid(
+    prices: list[tuple[date, float]], days: list[date]
+) -> list[tuple[date, float]]:
+    """Дневные доходности актива на общей сетке торговых дней.
+
+    Последняя известная цена протягивается вперёд: если бумага не торговалась,
+    доходность дня нулевая до следующей сделки. После первой цены ряд непрерывен,
+    поэтому пары активов можно сопоставлять по датам без сдвигов.
+    """
+    out: list[tuple[date, float]] = []
+    idx = 0
+    last: float | None = None
+    prev: float | None = None
+    for day in days:
+        while idx < len(prices) and prices[idx][0] <= day:
+            last = prices[idx][1]
+            idx += 1
+        if last is None:
+            continue
+        if prev is not None and prev > EPS:
+            out.append((day, last / prev - 1.0))
+        prev = last
+    return out
 
 
 def _align_benchmark(dates: list[date], prices: dict[date, float]) -> dict:

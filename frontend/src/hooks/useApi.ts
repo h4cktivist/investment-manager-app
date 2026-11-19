@@ -1,9 +1,10 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
   api,
   qs,
   type Allocation,
+  type BookPaymentResult,
   type BondsResponse,
   type CalendarResponse,
   type Dashboard,
@@ -111,6 +112,33 @@ export function useCalendar(dateFrom?: string, dateTo?: string) {
       api.get<CalendarResponse>(
         `/calendar${qs({ portfolio_id: selected, date_from: dateFrom, date_to: dateTo })}`,
       ),
+  })
+}
+
+export interface BookPaymentPayload {
+  asset_id: number
+  kind: string
+  payment_date: string
+  portfolio_ids?: number[]
+}
+
+/** Зачислить выплату из календаря в сделки. */
+export function useBookPayment() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: BookPaymentPayload) =>
+      api.post<BookPaymentResult>('/calendar/payments/book', payload),
+    onSuccess: () => queryClient.invalidateQueries(),
+  })
+}
+
+/** Досрочно запустить автозачисление наступивших выплат. */
+export function useAutoPostPayments() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      api.post<{ posted: number; items: unknown[] }>('/calendar/payments/auto-post'),
+    onSuccess: () => queryClient.invalidateQueries(),
   })
 }
 

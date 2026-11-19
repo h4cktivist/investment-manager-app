@@ -241,6 +241,49 @@ def test_max_drawdown_finds_worst_peak_to_trough():
     assert (start, end) == (1, 4)
 
 
+def test_historical_var_and_expected_shortfall():
+    daily = [0.01, -0.05, 0.02, -0.01, -0.03, 0.005, -0.02, 0.0, 0.015, -0.04]
+    # позиция 9 × 5 % = 0,45 → интерполяция между −5 % и −4 %
+    assert m.historical_var(daily, 0.95) == pytest.approx(-0.0455)
+    # за границей VaR остаётся только худший день
+    assert m.expected_shortfall(daily, 0.95) == pytest.approx(-0.05)
+    assert m.historical_var([0.01], 0.95) is None
+
+
+def test_risk_values_annualize_by_root_time():
+    assert m.annualize_risk(-0.01) == pytest.approx(-0.01 * 252 ** 0.5)
+    assert m.annualize_risk(None) is None
+
+
+def test_calmar_is_return_per_unit_of_drawdown():
+    assert m.calmar(0.20, -0.10) == pytest.approx(2.0)
+    assert m.calmar(0.20, 0.0) is None
+    assert m.calmar(None, -0.10) is None
+
+
+def test_compute_metrics_exposes_tail_risk_and_extremes():
+    day = date(2025, 1, 1)
+    total = 10_000.0
+    points = [ValuationPoint(day, total, 0, total, 0, total, 0)]
+    moves = [0.01, -0.02, 0.005, -0.03, 0.02] * 15  # 75 торговых дней
+    for offset, move in enumerate(moves, start=1):
+        total *= 1 + move
+        points.append(
+            ValuationPoint(day + timedelta(days=offset), total, 0, total, 0, total, 0)
+        )
+
+    bundle = m.compute_metrics(points, [], total, risk_free=0.0)
+    assert bundle.observations == len(points)
+    assert bundle.var_95_daily is not None
+    assert bundle.var_99_daily is not None
+    # ES не может быть мягче VaR: это средний убыток за его границей
+    assert bundle.es_95_daily <= bundle.var_95_daily
+    assert bundle.worst_day == pytest.approx(-0.03)
+    assert bundle.worst_day_date is not None
+    assert bundle.best_day == pytest.approx(0.02)
+    assert bundle.best_day_date is not None
+
+
 # ------------------------------------------------------------- облигации
 
 

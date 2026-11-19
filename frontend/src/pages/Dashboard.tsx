@@ -9,7 +9,7 @@ import {
 import PassiveIncomeCard from '../components/PassiveIncome'
 import { Badge, Card, ErrorBox, Money, SegmentedControl, Spinner, StatTile, toneOf } from '../components/ui'
 import { useDashboard } from '../hooks/useApi'
-import { PAYMENT_LABELS, daysWord, fmtDate, pct, pctRaw, rub } from '../lib/format'
+import { PAYMENT_LABELS, daysWord, fmtDate, fmtMonth, num, pct, pctRaw, rub } from '../lib/format'
 import { useSelection } from '../lib/store'
 
 const PERIODS = [
@@ -38,6 +38,7 @@ export default function Dashboard() {
     passive_income,
     income_months,
     upcoming_payments,
+    macro,
   } = data
   const hasData = summary.positions_count > 0 || summary.total_value !== 0
 
@@ -226,6 +227,73 @@ export default function Dashboard() {
           hint="денежно-взвешенная годовая"
         />
       </div>
+
+      {macro?.available && (
+        <Card
+          title="Макроэкономика"
+          subtitle="Ключевая ставка, инфляция и доходность ОФЗ — бесплатные данные ЦБ РФ и Мосбиржи"
+        >
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {macro.key_rate && (
+              <StatTile
+                label="Ключевая ставка"
+                value={pctRaw(macro.key_rate.value)}
+                delta={
+                  macro.key_rate.change === null
+                    ? 'без изменений'
+                    : `${macro.key_rate.change > 0 ? '+' : macro.key_rate.change < 0 ? '−' : ''}${num(
+                        Math.abs(macro.key_rate.change),
+                        2,
+                      )} п.п.`
+                }
+                deltaTone="neutral"
+                hint={`с ${fmtDate(macro.key_rate.date)}${
+                  macro.key_rate.as_of ? ` · данные на ${fmtDate(macro.key_rate.as_of)}` : ''
+                }`}
+              />
+            )}
+            {macro.inflation && (
+              <StatTile
+                label="Инфляция г/г"
+                value={pctRaw(macro.inflation.value)}
+                delta={
+                  macro.inflation.previous !== null
+                    ? `${macro.inflation.value >= macro.inflation.previous ? '+' : '−'}${num(
+                        Math.abs(macro.inflation.value - macro.inflation.previous),
+                        2,
+                      )} п.п. к прошлому месяцу`
+                    : undefined
+                }
+                deltaTone="neutral"
+                hint={`${fmtMonth(macro.inflation.date)}${
+                  macro.inflation.target !== null ? ` · цель ${pctRaw(macro.inflation.target)}` : ''
+                }`}
+              />
+            )}
+            {macro.inflation_monthly && (
+              <StatTile
+                label="Инфляция м/м"
+                value={pctRaw(macro.inflation_monthly.value)}
+                hint={`${
+                  macro.inflation_monthly.date
+                    ? fmtMonth(macro.inflation_monthly.date)
+                    : 'последний месяц'
+                } · с сезонной корректировкой`}
+              />
+            )}
+            {macro.ofz && (
+              <StatTile
+                label={`ОФЗ ${num(macro.ofz.tenor, 0)} лет`}
+                value={pctRaw(macro.ofz.value)}
+                hint={`${fmtDate(macro.ofz.date)} · кривая бескупонной доходности`}
+              />
+            )}
+          </div>
+          {macro.notes.length > 0 && (
+            <p className="mt-3 text-2xs text-muted">{macro.notes.join(' ')}</p>
+          )}
+        </Card>
+      )}
 
       <Card title="Крупнейшие позиции" subtitle={`Топ-10 из ${summary.positions_count}`}>
         <div className="overflow-x-auto">

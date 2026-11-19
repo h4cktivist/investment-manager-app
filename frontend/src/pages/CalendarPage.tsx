@@ -1,10 +1,20 @@
 import { useMemo, useState } from 'react'
 
 import { MonthlyBars } from '../components/charts'
-import { Badge, Card, ErrorBox, SegmentedControl, Spinner, Spinner as Loading, StatTile } from '../components/ui'
-import { useCalendar, usePaymentsHistory } from '../hooks/useApi'
-import type { CalendarItem } from '../lib/api'
+import {
+  Badge,
+  Button,
+  Card,
+  ErrorBox,
+  SegmentedControl,
+  Spinner,
+  Spinner as Loading,
+  StatTile,
+} from '../components/ui'
+import { useAutoPostPayments, useBookPayment, useCalendar, usePaymentsHistory } from '../hooks/useApi'
+import type { BookPaymentResult, CalendarItem } from '../lib/api'
 import { PAYMENT_LABELS, daysWord, fmtDate, fmtMonth, num, rub } from '../lib/format'
+import { useSelection } from '../lib/store'
 
 const HORIZONS = [
   { value: '3', label: '3 месяца' },
@@ -16,6 +26,7 @@ const HORIZONS = [
 export default function CalendarPage() {
   const [horizon, setHorizon] = useState('12')
   const [tab, setTab] = useState<'plan' | 'history'>('plan')
+  const { selected } = useSelection()
 
   const dateTo = useMemo(() => {
     const d = new Date()
@@ -25,6 +36,39 @@ export default function CalendarPage() {
 
   const { data, isLoading, error } = useCalendar(undefined, dateTo)
   const history = usePaymentsHistory()
+  const book = useBookPayment()
+  const autoPost = useAutoPostPayments()
+  const today = localToday()
+
+  const handleBook = (item: CalendarItem) => {
+    if (
+      item.payment_date > today &&
+      !confirm('Дата выплаты ещё не наступила. Зачислить её досрочно?')
+    ) {
+      return
+    }
+    if (
+      item.is_forecast &&
+      !confirm('Сумма выплаты прогнозная. Зачислить её по прогнозной сумме?')
+    ) {
+      return
+    }
+    book.reset()
+    book.mutate({
+      asset_id: item.asset_id,
+      kind: item.kind,
+      payment_date: item.payment_date,
+      portfolio_ids: selected.length ? selected : undefined,
+    })
+  }
+
+  const handleAutoPost = () => {
+    if (!confirm('Зачислить все прошедшие выплаты из календаря в сделки?')) return
+    autoPost.reset()
+    autoPost.mutate()
+  }
+
+  const bookingKey = book.isPending && book.variables ? itemKey(book.variables) : null
 
   if (isLoading) return <Spinner />
   if (error) return <ErrorBox error={error} />
@@ -61,13 +105,44 @@ export default function CalendarPage() {
             ]}
           />
           {tab === 'plan' && (
-            <SegmentedControl size="xs" value={horizon} onChange={setHorizon} options={HORIZONS} />
+            <>
+              <SegmentedControl size="xs" value={horizon} onChange={setHorizon} options={HORIZONS} />
+              <Button
+                onClick={handleAutoPost}
+                disabled={autoPost.isPending}
+                title="Создать операции по выплатам, дата которых уже прошла"
+              >
+                {autoPost.isPending ? 'Зачисляю…' : '↻ Зачислить прошедшие'}
+              </Button>
+            </>
           )}
         </div>
       </div>
 
       {tab === 'plan' ? (
         <>
+          {book.data && (
+            <BookingNotice result={book.data} onClose={() => book.reset()} />
+          )}
+          {book.isError && <ErrorBox error={book.error} />}
+          {autoPost.data && (
+            <div className="flex items-center justify-between gap-3 rounded-card border border-[var(--good)]/40 bg-surface px-4 py-2.5 text-xs text-ink-2">
+              <span>
+                {autoPost.data.posted
+                  ? `Автоматически зачислено выплат: ${num(autoPost.data.posted, 0)}`
+                  : 'Новых прошедших выплат для зачисления нет'}
+              </span>
+              <button
+                onClick={() => autoPost.reset()}
+                className="text-muted hover:text-ink"
+                aria-label="Скрыть сообщение"
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {autoPost.isError && <ErrorBox error={autoPost.error} />}
+
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
               large
@@ -119,6 +194,8 @@ export default function CalendarPage() {
                 month={month}
                 items={items}
                 defaultOpen={index < 2}
+                onBook={handleBook}
+                bookingKey={bookingKey}
               />
             ))}
             {!upcoming.length && (
@@ -197,14 +274,61 @@ export default function CalendarPage() {
   )
 }
 
+function BookingNotice({
+  result,
+  onClose,
+}: {
+  result: BookPaymentResult
+  onClose: () => void
+}) {
+  const created = result.items.filter((item) => item.created)
+  const label = PAYMENT_LABELS[result.kind] ?? result.kind
+  const date = fmtDate(result.payment_date)
+
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-card border border-[var(--good)]/40 bg-surface px-4 py-2.5 text-xs text-ink-2">
+      <span>
+        {created.length ? (
+          <>
+            {`Зачислено: ${label.toLowerCase()} за ${date} — ${rub(
+              created.reduce((sum, item) => sum + item.amount, 0),
+            )}`}
+            {` · ${[...new Set(created.map((item) => item.portfolio_name))].join(', ')}`}
+          </>
+        ) : (
+          `Выплата «${label}» за ${date} уже зачислена ранее`
+        )}
+      </span>
+      <button onClick={onClose} className="text-muted hover:text-ink" aria-label="Скрыть сообщение">
+        ×
+      </button>
+    </div>
+  )
+}
+
+function itemKey(item: { asset_id: number; kind: string; payment_date: string }): string {
+  return `${item.asset_id}-${item.kind}-${item.payment_date}`
+}
+
+function localToday(): string {
+  const now = new Date()
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 10)
+}
+
 function MonthGroup({
   month,
   items,
   defaultOpen,
+  onBook,
+  bookingKey,
 }: {
   month: string
   items: CalendarItem[]
   defaultOpen: boolean
+  onBook: (item: CalendarItem) => void
+  bookingKey: string | null
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const total = items.reduce((s, i) => s + i.amount, 0)
@@ -226,7 +350,7 @@ function MonthGroup({
 
       {open && (
         <div className="overflow-x-auto border-t border-line">
-          <table className="w-full min-w-[760px] text-xs">
+          <table className="w-full min-w-[860px] text-xs">
             <thead>
               <tr className="border-b border-line text-left text-2xs uppercase text-muted">
                 <th className="px-3 py-2 font-medium">Дата</th>
@@ -236,12 +360,13 @@ function MonthGroup({
                 <th className="px-3 py-2 text-right font-medium">Кол-во</th>
                 <th className="px-3 py-2 text-right font-medium">Сумма</th>
                 <th className="px-3 py-2 font-medium">Отсечка</th>
+                <th className="px-3 py-2 text-right font-medium">Действие</th>
               </tr>
             </thead>
             <tbody>
               {items.map((item) => (
                 <tr
-                  key={`${item.asset_id}-${item.kind}-${item.payment_date}`}
+                  key={itemKey(item)}
                   className="border-b border-line/60"
                 >
                   <td className="tnum whitespace-nowrap px-3 py-2 text-ink-2">
@@ -272,6 +397,20 @@ function MonthGroup({
                   </td>
                   <td className="tnum px-3 py-2 text-2xs text-muted">
                     {item.record_date ? fmtDate(item.record_date) : '—'}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right">
+                    <button
+                      onClick={() => onBook(item)}
+                      disabled={bookingKey !== null}
+                      title={
+                        item.is_forecast
+                          ? 'Сумма выплаты прогнозная — после зачисления проверьте её'
+                          : 'Создать операцию по этой выплате'
+                      }
+                      className="rounded-md border border-line px-2 py-1 text-2xs font-medium text-ink-2 transition hover:bg-raised hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {bookingKey === itemKey(item) ? 'Зачисляю…' : 'Зачислить'}
+                    </button>
                   </td>
                 </tr>
               ))}

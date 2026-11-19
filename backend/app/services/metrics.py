@@ -104,6 +104,102 @@ def downside_deviation(
     return math.sqrt(var) * math.sqrt(trading_days)
 
 
+def percentile(values: list[float], q: float) -> float:
+    """Квантиль с линейной интерполяцией между соседними точками."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = (len(ordered) - 1) * min(max(q, 0.0), 1.0)
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return ordered[lo]
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+def historical_var(daily: list[float], level: float = 0.95) -> float | None:
+    """Исторический VaR: граница худших (1−level) дневных доходностей.
+
+    Возвращается доходность со знаком: −0,02 значит «потеря до 2 %».
+    Уровень 0.95 — 5 % худших дней.
+    """
+    if len(daily) < 2:
+        return None
+    return percentile(daily, 1.0 - level)
+
+
+def expected_shortfall(daily: list[float], level: float = 0.95) -> float | None:
+    """Expected Shortfall (CVaR): средний убыток за границей VaR."""
+    if len(daily) < 2:
+        return None
+    var = historical_var(daily, level)
+    if var is None:
+        return None
+    tail = [r for r in daily if r <= var]
+    if not tail:
+        return var
+    return sum(tail) / len(tail)
+
+
+def annualize_risk(value: float | None, trading_days: int = TRADING_DAYS) -> float | None:
+    """Оценка дневного риска в годовом выражении (масштаб √252)."""
+    if value is None:
+        return None
+    return value * math.sqrt(trading_days)
+
+
+def covariance(a: list[float], b: list[float]) -> float | None:
+    """Выборочная ковариация дневных доходностей (несмещённая)."""
+    n = min(len(a), len(b))
+    if n < 3:
+        return None
+    x, y = a[:n], b[:n]
+    mx = sum(x) / n
+    my = sum(y) / n
+    return sum((x[i] - mx) * (y[i] - my) for i in range(n)) / (n - 1)
+
+
+def correlation(a: list[float], b: list[float]) -> float | None:
+    """Корреляция Пирсона; None, если ряд вырожденный (нет движения)."""
+    n = min(len(a), len(b))
+    if n < 3:
+        return None
+    cov = covariance(a, b)
+    if cov is None:
+        return None
+    sx = stdev(a[:n])
+    sy = stdev(b[:n])
+    if sx < EPS or sy < EPS:
+        return None
+    return max(-1.0, min(1.0, cov / (sx * sy)))
+
+
+def pair_statistics(a: list[float], b: list[float]) -> dict | None:
+    """Корреляция, ковариация и число наблюдений для пары активов."""
+    n = min(len(a), len(b))
+    if n < 3:
+        return None
+    cov = covariance(a, b)
+    corr = correlation(a, b)
+    if cov is None or corr is None:
+        return None
+    return {
+        "observations": n,
+        "correlation": corr,
+        "covariance": cov,
+        "covariance_annual": cov * TRADING_DAYS,
+    }
+
+
+def calmar(annual_return: float | None, max_dd: float) -> float | None:
+    """Calmar: годовая доходность на единицу максимальной просадки."""
+    if annual_return is None or max_dd >= -EPS:
+        return None
+    return annual_return / abs(max_dd)
+
+
 def sharpe(annual_return: float, annual_vol: float, risk_free: float) -> float | None:
     if annual_vol < EPS:
         return None
@@ -249,6 +345,7 @@ class MetricsBundle:
     start: date | None
     end: date | None
     days: int
+    observations: int
     twr: float
     twr_annual: float | None
     xirr: float | None
@@ -256,8 +353,22 @@ class MetricsBundle:
     max_drawdown: float
     max_drawdown_start: date | None
     max_drawdown_end: date | None
+    max_drawdown_days: int | None
+    var_95_daily: float | None
+    es_95_daily: float | None
+    var_99_daily: float | None
+    es_99_daily: float | None
+    var_95_annual: float | None
+    es_95_annual: float | None
+    var_99_annual: float | None
+    es_99_annual: float | None
+    worst_day: float | None
+    worst_day_date: date | None
+    best_day: float | None
+    best_day_date: date | None
     sharpe: float | None
     sortino: float | None
+    calmar: float | None
     beta: float | None
     alpha: float | None
     correlation: float | None
@@ -278,11 +389,17 @@ def compute_metrics(
 ) -> MetricsBundle:
     if not points:
         return MetricsBundle(
-            start=None, end=None, days=0, twr=0.0, twr_annual=None, xirr=None,
-            volatility=0.0, max_drawdown=0.0, max_drawdown_start=None,
-            max_drawdown_end=None, sharpe=None, sortino=None, beta=None,
-            alpha=None, correlation=None, benchmark_code=benchmark_code,
-            benchmark_return=benchmark_total, risk_free_rate=risk_free,
+            start=None, end=None, days=0, observations=0, twr=0.0,
+            twr_annual=None, xirr=None, volatility=0.0, max_drawdown=0.0,
+            max_drawdown_start=None, max_drawdown_end=None,
+            max_drawdown_days=None, var_95_daily=None, es_95_daily=None,
+            var_99_daily=None, es_99_daily=None, var_95_annual=None,
+            es_95_annual=None, var_99_annual=None, es_99_annual=None,
+            worst_day=None, worst_day_date=None, best_day=None,
+            best_day_date=None, sharpe=None, sortino=None, calmar=None,
+            beta=None, alpha=None, correlation=None,
+            benchmark_code=benchmark_code, benchmark_return=benchmark_total,
+            risk_free_rate=risk_free,
         )
 
     series = twr_returns(points, opening_value=opening_value)
@@ -292,6 +409,25 @@ def compute_metrics(
     annual = annualize(total, days)
     vol = volatility(series.daily)
     dd, dd_from, dd_to = max_drawdown(series.index)
+    observations = len(series.daily)
+
+    # На коротком окне крайние квантили — это просто минимум ряда,
+    # поэтому 99 % показываем только при достаточной истории.
+    var_95 = historical_var(series.daily, 0.95) if observations >= 20 else None
+    es_95 = expected_shortfall(series.daily, 0.95) if observations >= 20 else None
+    var_99 = historical_var(series.daily, 0.99) if observations >= 60 else None
+    es_99 = expected_shortfall(series.daily, 0.99) if observations >= 60 else None
+
+    worst_day = worst_day_date = best_day = best_day_date = None
+    if series.daily:
+        worst_i = min(range(observations), key=series.daily.__getitem__)
+        best_i = max(range(observations), key=series.daily.__getitem__)
+        worst_day, worst_day_date = series.daily[worst_i], series.dates[worst_i]
+        best_day, best_day_date = series.daily[best_i], series.dates[best_i]
+
+    dd_days = None
+    if isinstance(dd_from, int) and isinstance(dd_to, int) and series.dates:
+        dd_days = (series.dates[dd_to] - series.dates[dd_from]).days
 
     beta = alpha = corr = None
     if benchmark_daily:
@@ -301,6 +437,7 @@ def compute_metrics(
         start=start,
         end=end,
         days=days,
+        observations=observations,
         twr=total,
         twr_annual=annual,
         xirr=money_weighted_return(
@@ -310,8 +447,22 @@ def compute_metrics(
         max_drawdown=dd,
         max_drawdown_start=series.dates[dd_from] if isinstance(dd_from, int) and series.dates else None,
         max_drawdown_end=series.dates[dd_to] if isinstance(dd_to, int) and series.dates else None,
+        max_drawdown_days=dd_days,
+        var_95_daily=var_95,
+        es_95_daily=es_95,
+        var_99_daily=var_99,
+        es_99_daily=es_99,
+        var_95_annual=annualize_risk(var_95),
+        es_95_annual=annualize_risk(es_95),
+        var_99_annual=annualize_risk(var_99),
+        es_99_annual=annualize_risk(es_99),
+        worst_day=worst_day,
+        worst_day_date=worst_day_date,
+        best_day=best_day,
+        best_day_date=best_day_date,
         sharpe=sharpe(annual, vol, risk_free) if annual is not None else None,
         sortino=sortino(annual, series.daily, risk_free) if annual is not None else None,
+        calmar=calmar(annual, dd),
         beta=beta,
         alpha=alpha,
         correlation=corr,

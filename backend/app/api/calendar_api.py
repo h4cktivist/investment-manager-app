@@ -1,14 +1,29 @@
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select
 
 from app.api.deps import DB, PortfolioIds
 from app.enums import INCOME_TYPES, PaymentKind
-from app.models import Transaction
-from app.schemas import CalendarItem, CalendarMonth, CalendarResponse
+from app.models import Asset, Transaction
+from app.schemas import (
+    BookedPaymentOut,
+    BookPaymentRequest,
+    BookPaymentResponse,
+    CalendarItem,
+    CalendarMonth,
+    CalendarResponse,
+)
 from app.services.analytics import PortfolioAnalytics
+from app.services.payments import (
+    NoHoldingsError,
+    PaymentNotFoundError,
+    UnsupportedPaymentError,
+    auto_book_due_payments,
+    book_schedule_payment,
+)
 from app.services.portfolio import upcoming_payments_for_holdings
 
 router = APIRouter(prefix="/calendar", tags=["Календарь выплат"])
@@ -72,6 +87,60 @@ async def payments_calendar(
         total_amount=round(sum(i.amount for i in items if not i.is_paid), 2),
         next_payment=future[0] if future else None,
     )
+
+
+@router.post(
+    "/payments/book",
+    response_model=BookPaymentResponse,
+    summary="Зачислить выплату из календаря в сделки",
+)
+async def book_payment(payload: BookPaymentRequest, db: DB):
+    """Ручное зачисление: создаёт операцию по выплате во всех портфелях,
+    где на дату фиксации реестра была открыта позиция.
+
+    Если операция уже была создана автоматически, импортом или вручную,
+    повторная запись не делается — в ответе будет ``created=false``.
+    """
+    try:
+        results = await book_schedule_payment(
+            db,
+            asset_id=payload.asset_id,
+            kind=payload.kind.value,
+            payment_date=payload.payment_date,
+            portfolio_ids=payload.portfolio_ids,
+        )
+    except PaymentNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except NoHoldingsError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except UnsupportedPaymentError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    asset = await db.get(Asset, payload.asset_id)
+    return BookPaymentResponse(
+        asset_id=payload.asset_id,
+        secid=asset.secid if asset else "",
+        kind=payload.kind.value,
+        payment_date=payload.payment_date,
+        items=[BookedPaymentOut(**asdict(item)) for item in results],
+    )
+
+
+@router.post(
+    "/payments/auto-post",
+    summary="Зачислить все наступившие выплаты",
+)
+async def auto_post_payments(
+    db: DB,
+    lookback_days: int | None = Query(None, ge=0, le=3650),
+):
+    """Досрочно запускает фоновую задачу — например, после ручного импорта
+    истории, чтобы не ждать следующего цикла."""
+    results = await auto_book_due_payments(db, lookback_days=lookback_days)
+    return {
+        "posted": len(results),
+        "items": [asdict(item) for item in results],
+    }
 
 
 @router.get("/history", summary="Фактически полученные выплаты")

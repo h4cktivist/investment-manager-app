@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Query
@@ -5,6 +6,7 @@ from fastapi import APIRouter, Query
 from app.api.deps import DB, PortfolioIds
 from app.config import settings
 from app.services.analytics import PortfolioAnalytics
+from app.services.macro import macro_snapshot
 from app.services.portfolio import upcoming_payments_for_holdings
 
 router = APIRouter(prefix="/portfolio", tags=["Аналитика"])
@@ -75,6 +77,19 @@ async def metrics_all_periods(
     return out
 
 
+@router.get("/correlation", summary="Матрица корреляций активов")
+async def correlation(
+    db: DB,
+    portfolio_id: PortfolioIds = None,
+    period: str = PeriodQuery,
+    max_assets: int = Query(
+        15, ge=2, le=30, description="Сколько крупнейших позиций включить в матрицу"
+    ),
+):
+    analytics = await PortfolioAnalytics.load(db, portfolio_id)
+    return await analytics.correlation_matrix(period=period, max_assets=max_assets)
+
+
 @router.get("/bonds", summary="Доходности и дюрация облигаций")
 async def bonds(db: DB, portfolio_id: PortfolioIds = None):
     analytics = await PortfolioAnalytics.load(db, portfolio_id)
@@ -108,6 +123,9 @@ async def dashboard(
     positions_rows = analytics.positions()
     open_rows = [r for r in positions_rows if r["is_open"]]
 
+    # сеть не должна задерживать расчёт портфеля — грузим макро параллельно
+    macro_task = asyncio.create_task(macro_snapshot())
+
     today = date.today()
     upcoming = await upcoming_payments_for_holdings(
         db, analytics.open_quantities(), today, today + timedelta(days=90)
@@ -128,4 +146,5 @@ async def dashboard(
         ],
         "upcoming_total": sum(item["amount"] for item in upcoming),
         "risk_free_rate": settings.risk_free_rate,
+        "macro": await macro_task,
     }

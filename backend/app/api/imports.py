@@ -17,6 +17,7 @@ from app.schemas import (
 from app.services.importers.broker_csv import ImportError_, parse_csv
 from app.services.market_data import get_or_create_asset, sync_payment_schedule, sync_price_history
 from app.services.moex import MoexISS
+from app.services.payments import find_auto_payment
 from app.services.realtime import refresh_quotes_once
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,14 @@ router = APIRouter(prefix="/imports", tags=["Импорт"])
 MAX_SIZE = 20 * 1024 * 1024
 #: код формата, под которым сохраняются партии импорта
 CSV_FORMAT = "broker_csv"
+
+#: выплаты, которые могла успеть создать автоматическая задача
+PAYMENT_TYPES = {
+    TxType.DIVIDEND.value,
+    TxType.COUPON.value,
+    TxType.AMORTIZATION.value,
+    TxType.INTEREST.value,
+}
 
 
 def _filename(file: UploadFile) -> str:
@@ -167,6 +176,35 @@ async def commit_import(
             and asset.asset_class == AssetClass.BOND.value
         ):
             tx_type = TxType.COUPON.value
+
+        # Автозадача могла уже создать операцию по этой выплате. Не плодим
+        # дубль: заменяем автоматическую запись фактическими данными отчёта.
+        if (
+            asset is not None
+            and tx_type in PAYMENT_TYPES
+            and row.external_id not in existing_ids
+        ):
+            auto_tx = await find_auto_payment(
+                db, portfolio_id, asset.id, tx_type, row.executed_at.date()
+            )
+            if auto_tx is not None:
+                auto_tx.type = tx_type
+                auto_tx.executed_at = row.executed_at
+                auto_tx.price = row.price
+                auto_tx.quantity = row.quantity
+                auto_tx.amount = row.amount
+                auto_tx.fee = row.fee
+                auto_tx.tax = 0
+                auto_tx.accrued_interest = row.accrued_interest
+                auto_tx.currency = row.currency
+                auto_tx.note = row.note or auto_tx.note
+                auto_tx.source = "import"
+                auto_tx.external_id = row.external_id
+                auto_tx.import_batch_id = batch.id
+                auto_tx.do_not_adjust_cash = row.do_not_adjust_cash
+                imported += 1
+                existing_ids.add(row.external_id)
+                continue
 
         try:
             db.add(

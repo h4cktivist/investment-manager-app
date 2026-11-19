@@ -179,6 +179,7 @@ export interface Metrics {
   start?: string | null
   end?: string | null
   days?: number
+  observations?: number
   twr?: number
   /** null на окне короче месяца — приводить к году бессмысленно */
   twr_annual?: number | null
@@ -187,8 +188,23 @@ export interface Metrics {
   max_drawdown?: number
   max_drawdown_start?: string | null
   max_drawdown_end?: string | null
+  max_drawdown_days?: number | null
+  /** исторический VaR/ES; отрицательные значения — убыток */
+  var_95_daily?: number | null
+  es_95_daily?: number | null
+  var_99_daily?: number | null
+  es_99_daily?: number | null
+  var_95_annual?: number | null
+  es_95_annual?: number | null
+  var_99_annual?: number | null
+  es_99_annual?: number | null
+  worst_day?: number | null
+  worst_day_date?: string | null
+  best_day?: number | null
+  best_day_date?: string | null
   sharpe?: number | null
   sortino?: number | null
+  calmar?: number | null
   beta?: number | null
   alpha?: number | null
   correlation?: number | null
@@ -268,6 +284,24 @@ export interface CalendarResponse {
   next_payment: CalendarItem | null
 }
 
+export interface BookedPayment {
+  created: boolean
+  transaction_id: number | null
+  portfolio_id: number
+  portfolio_name: string
+  quantity: number
+  amount: number
+  tax: number
+}
+
+export interface BookPaymentResult {
+  asset_id: number
+  secid: string
+  kind: string
+  payment_date: string
+  items: BookedPayment[]
+}
+
 export interface Transaction {
   id: number
   portfolio_id: number
@@ -333,6 +367,50 @@ export interface TransactionPageResponse {
   offset: number
 }
 
+export interface MacroKeyRate {
+  value: number
+  /** дата, с которой действует ставка */
+  date: string
+  /** дата последних данных ЦБ */
+  as_of: string | null
+  previous: number | null
+  change: number | null
+}
+
+export interface MacroInflation {
+  value: number
+  /** YYYY-MM */
+  date: string
+  target: number | null
+  previous: number | null
+}
+
+export interface MacroMonthlyInflation {
+  value: number
+  /** YYYY-MM; null, если дату не удалось разобрать */
+  date: string | null
+  seasonally_adjusted: boolean
+}
+
+export interface MacroOfz {
+  tenor: number
+  value: number
+  date: string
+  curve: { tenor: number; value: number }[]
+}
+
+export interface Macro {
+  available: boolean
+  disabled?: boolean
+  updated_at?: string
+  key_rate: MacroKeyRate | null
+  inflation: MacroInflation | null
+  inflation_monthly: MacroMonthlyInflation | null
+  ofz: MacroOfz | null
+  sources: string[]
+  notes: string[]
+}
+
 export interface Dashboard {
   summary: Summary
   allocation: Allocation
@@ -344,6 +422,7 @@ export interface Dashboard {
   upcoming_payments: CalendarItem[]
   upcoming_total: number
   risk_free_rate: number
+  macro: Macro
 }
 
 export interface Asset {

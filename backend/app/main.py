@@ -13,6 +13,7 @@ from app.api import (
     benchmarks,
     calendar_api,
     imports,
+    macro_api,
     portfolios,
     sync_api,
     transactions,
@@ -24,6 +25,7 @@ from app.models import Asset, Benchmark, Transaction
 from app.schemas import HealthOut
 from app.services.market_data import ensure_benchmarks, sync_benchmark_history
 from app.services.moex import MoexISS
+from app.services.payments import payment_autoposter
 from app.services.realtime import build_provider, hub, quote_poller
 
 logging.basicConfig(
@@ -71,6 +73,7 @@ async def lifespan(app: FastAPI):
     # обе задачи фоновые — API отвечает сразу, данные догружаются следом
     tasks.append(asyncio.create_task(_startup_sync(), name="startup-sync"))
     tasks.append(asyncio.create_task(quote_poller(), name="quote-poller"))
+    tasks.append(asyncio.create_task(payment_autoposter(), name="payment-autoposter"))
     log.info("API готов, провайдер котировок: %s", build_provider().name)
     try:
         yield
@@ -110,6 +113,7 @@ for api_router in (
     imports.router,
     analytics_api.router,
     calendar_api.router,
+    macro_api.router,
     benchmarks.router,
     sync_api.router,
 ):

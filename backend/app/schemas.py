@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.enums import AssetClass, PayoutFrequency, PortfolioKind, TxType
+from app.enums import AssetClass, PaymentKind, PayoutFrequency, PortfolioKind, TxType
 
 
 class ORMModel(BaseModel):
@@ -290,6 +290,36 @@ class CalendarResponse(BaseModel):
     by_month: list[CalendarMonth]
     total_amount: float
     next_payment: CalendarItem | None = None
+
+
+class BookPaymentRequest(BaseModel):
+    """Ручное зачисление выплаты из календаря в сделки."""
+
+    asset_id: int
+    kind: PaymentKind
+    payment_date: date
+    portfolio_ids: list[int] | None = Field(
+        default=None,
+        description="Портфели для зачисления. Пусто — все, где была открыта позиция",
+    )
+
+
+class BookedPaymentOut(BaseModel):
+    created: bool
+    transaction_id: int | None
+    portfolio_id: int
+    portfolio_name: str
+    quantity: float
+    amount: float
+    tax: float = 0.0
+
+
+class BookPaymentResponse(BaseModel):
+    asset_id: int
+    secid: str
+    kind: str
+    payment_date: date
+    items: list[BookedPaymentOut]
 
 
 # ------------------------------------------------------------------ прочее
