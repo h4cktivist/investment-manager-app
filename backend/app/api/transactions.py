@@ -2,10 +2,11 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DB, not_found
-from app.enums import TxType
+from app.enums import AssetClass, TxType
 from app.models import Asset, Portfolio, Transaction
 from app.schemas import (
     TransactionCreate,
@@ -13,8 +14,14 @@ from app.schemas import (
     TransactionPage,
     TransactionUpdate,
 )
-from app.services.market_data import get_or_create_asset, sync_payment_schedule, sync_price_history
+from app.services.market_data import (
+    get_or_create_asset,
+    quote_for_date,
+    sync_payment_schedule,
+    sync_price_history,
+)
 from app.services.moex import MoexISS
+from app.services.portfolio import EPS, available_quantity, load_transactions
 
 router = APIRouter(prefix="/transactions", tags=["Сделки"])
 
@@ -43,6 +50,49 @@ def _serialize(tx: Transaction) -> TransactionOut:
         source=tx.source,
         do_not_adjust_cash=tx.do_not_adjust_cash,
     )
+
+
+async def _available_to_sell(
+    db: AsyncSession,
+    portfolio_id: int,
+    asset_id: int,
+    executed_at: datetime,
+    exclude_id: int | None = None,
+) -> float:
+    """Остаток бумаги перед сделкой с учётом порядка сделок внутри дня."""
+    history = await load_transactions(db, [portfolio_id])
+    # у новой сделки ещё нет id — она встанет после всех сделок того же дня
+    before = (executed_at, float("inf") if exclude_id is None else exclude_id)
+    return available_quantity(history, asset_id, before, exclude_id=exclude_id)
+
+
+async def _ensure_sellable(
+    db: AsyncSession,
+    portfolio_id: int,
+    asset: Asset,
+    quantity: float,
+    executed_at: datetime,
+    exclude_id: int | None = None,
+) -> None:
+    """Проверяет, что продажа не превышает остаток в портфеле."""
+    if quantity <= EPS:
+        raise HTTPException(400, "Количество в продаже должно быть больше нуля")
+
+    available = await _available_to_sell(
+        db, portfolio_id, asset.id, executed_at, exclude_id=exclude_id
+    )
+    if available <= EPS:
+        raise HTTPException(
+            400,
+            f"В портфеле нет бумаг {asset.secid} на {executed_at:%d.%m.%Y}. "
+            "Продать можно только то, что уже куплено",
+        )
+    if quantity > available + EPS:
+        raise HTTPException(
+            400,
+            f"Нельзя продать {quantity:g} {asset.secid}: "
+            f"в портфеле только {available:g}",
+        )
 
 
 @router.get("", response_model=TransactionPage, summary="Список сделок")
@@ -107,8 +157,32 @@ async def create_transaction(payload: TransactionCreate, db: DB):
             if asset and not asset.is_custom and asset.engine:
                 await sync_price_history(db, asset, iss=iss)
                 await sync_payment_schedule(db, asset, iss)
+
+            # по облигациям цена и НКД известны бирже — не заставляем вводить руками
+            if (
+                asset is not None
+                and asset.asset_class == AssetClass.BOND.value
+                and payload.type in (TxType.BUY, TxType.SELL)
+                and (not payload.price or not payload.accrued_interest)
+            ):
+                quote = await quote_for_date(db, asset, payload.executed_at.date(), iss=iss)
+                if not payload.price and quote["price"]:
+                    payload.price = quote["price"]
+                if not payload.accrued_interest and quote["accrued_interest"] is not None:
+                    payload.accrued_interest = quote["accrued_interest"]
     elif payload.type not in NO_ASSET_TYPES:
         raise HTTPException(400, f"Для операции {payload.type.value} нужен тикер (secid)")
+
+    if payload.type == TxType.SELL:
+        if asset is None:
+            raise HTTPException(400, "Для продажи нужен инструмент")
+        await _ensure_sellable(
+            db,
+            payload.portfolio_id,
+            asset,
+            float(payload.quantity),
+            payload.executed_at,
+        )
 
     amount = payload.amount
     if amount is None:
@@ -154,6 +228,31 @@ async def update_transaction(tx_id: int, payload: TransactionUpdate, db: DB):
     data = payload.model_dump(exclude_unset=True)
     if "type" in data and data["type"] is not None:
         data["type"] = TxType(data["type"]).value
+
+    final_type = data.get("type", tx.type)
+    changes_order = (
+        ("type" in data and data["type"] is not None and data["type"] != tx.type)
+        or (
+            "quantity" in data
+            and float(data["quantity"]) != float(tx.quantity)
+        )
+        or ("executed_at" in data and data["executed_at"] != tx.executed_at)
+    )
+    if final_type == TxType.SELL.value and changes_order:
+        if tx.asset_id is None:
+            raise HTTPException(400, "Для продажи нужен инструмент")
+        asset = tx.asset or await db.get(Asset, tx.asset_id)
+        if asset is None:
+            raise not_found("Актив")
+        await _ensure_sellable(
+            db,
+            tx.portfolio_id,
+            asset,
+            float(data.get("quantity", tx.quantity)),
+            data.get("executed_at", tx.executed_at),
+            exclude_id=tx.id,
+        )
+
     for key, value in data.items():
         setattr(tx, key, value)
     if "amount" not in data and ("price" in data or "quantity" in data):

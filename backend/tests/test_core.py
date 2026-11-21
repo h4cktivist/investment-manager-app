@@ -4,10 +4,12 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from app.services import bond_math, metrics as m
+from app.services.analytics import _returns_on_grid
 from app.services.importers.broker_csv import parse_csv, parse_number, resolve_payment_amount
 from app.services.portfolio import (
     PriceBook,
     ValuationPoint,
+    available_quantity,
     build_valuation_series,
     replay,
     resample_to_trading_days,
@@ -67,7 +69,8 @@ def test_fifo_realized_pnl_uses_oldest_lot_first():
 def test_fees_and_nkd_land_in_cost_basis():
     ledger = replay([FakeTx("BUY", "2025-01-10", price=1000, quantity=2, fee=6, accrued_interest=14)])
     pos = ledger.positions[1]
-    assert pos.cost_basis == pytest.approx(2020)  # 2000 + 6 комиссии + 14 НКД
+    # НКД за единицу 14 × 2 шт. = 28; себестоимость = 2000 + 6 комиссии + 28 НКД
+    assert pos.cost_basis == pytest.approx(2034)
     assert pos.avg_clean_price == pytest.approx(1000)
 
 
@@ -95,6 +98,45 @@ def test_amortization_reduces_cost_basis_not_quantity():
     assert pos.qty == pytest.approx(10)
     assert pos.cost_basis == pytest.approx(9500)
     assert pos.amortization == pytest.approx(500)
+
+
+def test_available_quantity_counts_only_earlier_transactions():
+    txs = [
+        FakeTx("BUY", "2025-01-10", price=100, quantity=10),
+        FakeTx("SELL", "2025-02-10", price=120, quantity=4),
+    ]
+    sale = txs[1]
+    sale_day = datetime(2025, 2, 10, 0, 0)
+
+    # новая продажа встанет после уже существующих сделок дня
+    assert available_quantity(txs, 1, (sale_day, float("inf"))) == pytest.approx(6)
+    # правка той же продажи: её собственное количество не должно попадать в остаток
+    assert available_quantity(txs, 1, (sale_day, sale.id)) == pytest.approx(10)
+    assert available_quantity(
+        txs, 1, (sale.executed_at, sale.id), exclude_id=sale.id
+    ) == pytest.approx(10)
+
+
+def test_available_quantity_is_zero_without_holdings():
+    txs = [FakeTx("BUY", "2025-01-10", price=100, quantity=10, asset_id=7)]
+    assert available_quantity(txs, 1, (datetime(2025, 1, 10), float("inf"))) == 0.0
+
+
+def test_available_quantity_respects_same_day_order_and_split():
+    txs = [
+        FakeTx("BUY", "2025-01-10", price=100, quantity=10),
+        FakeTx("BUY", "2025-01-10", price=100, quantity=5),
+        FakeTx("SPLIT", "2025-02-01", price=2),
+        FakeTx("SELL", "2025-03-01", price=100, quantity=12),
+    ]
+    second_buy = txs[1]
+    sale = txs[3]
+    assert available_quantity(
+        txs, 1, (second_buy.executed_at, second_buy.id)
+    ) == pytest.approx(10)
+    assert available_quantity(
+        txs, 1, (sale.executed_at, float("inf"))
+    ) == pytest.approx(18)
 
 
 def test_dividend_net_of_tax_goes_to_cash():
@@ -282,6 +324,43 @@ def test_compute_metrics_exposes_tail_risk_and_extremes():
     assert bundle.worst_day_date is not None
     assert bundle.best_day == pytest.approx(0.02)
     assert bundle.best_day_date is not None
+
+
+def test_covariance_and_correlation_of_identical_series():
+    series = [0.01, -0.02, 0.03, -0.01, 0.005]
+    assert m.covariance(series, series) == pytest.approx(m.stdev(series) ** 2)
+    assert m.correlation(series, series) == pytest.approx(1.0)
+
+
+def test_correlation_of_opposite_series_is_minus_one():
+    series = [0.01, -0.02, 0.03, -0.01, 0.005]
+    assert m.correlation(series, [-value for value in series]) == pytest.approx(-1.0)
+
+
+def test_correlation_is_undefined_without_variation():
+    assert m.correlation([0.01] * 10, [0.01, 0.02] * 5) is None
+    assert m.correlation([0.01, 0.02], [0.01, 0.02]) is None  # меньше трёх точек
+
+
+def test_pair_statistics_reports_covariance_and_annual_scale():
+    a = [0.01, -0.02, 0.03, 0.005]
+    b = [0.02, -0.04, 0.06, 0.01]
+    stats = m.pair_statistics(a, b)
+    assert stats["observations"] == 4
+    assert stats["correlation"] == pytest.approx(1.0)
+    assert stats["covariance_annual"] == pytest.approx(stats["covariance"] * 252)
+
+
+def test_returns_on_grid_forward_fills_and_skips_leading_gap():
+    days = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7), date(2026, 1, 8)]
+    prices = [(date(2026, 1, 6), 100.0), (date(2026, 1, 8), 110.0)]
+    out = dict(_returns_on_grid(prices, days))
+
+    # до первой цены доходности нет, первый день лишь задаёт базу
+    assert date(2026, 1, 5) not in out
+    assert date(2026, 1, 6) not in out
+    assert out[date(2026, 1, 7)] == pytest.approx(0.0)   # цена протянута
+    assert out[date(2026, 1, 8)] == pytest.approx(0.1)
 
 
 # ------------------------------------------------------------- облигации

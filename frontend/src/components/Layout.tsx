@@ -2,28 +2,75 @@ import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 
 import { useQuotes } from '../hooks/useQuotes'
+import { useSyncAll } from '../hooks/useApi'
 import { rub, signed } from '../lib/format'
 import { useSelection } from '../lib/store'
 import { useTheme } from '../lib/theme'
-import { Money, cx } from './ui'
+import { Button, Money, cx } from './ui'
 
-const NAV = [
-  { to: '/', label: 'Дашборд', end: true },
-  { to: '/positions', label: 'Позиции' },
-  { to: '/transactions', label: 'Сделки' },
-  { to: '/calendar', label: 'Календарь' },
-  { to: '/bonds', label: 'Облигации' },
-  { to: '/metrics', label: 'Метрики' },
-  { to: '/benchmarks', label: 'Бенчмарки' },
-  { to: '/assets', label: 'Активы' },
-  { to: '/import', label: 'Импорт' },
+const NAV_GROUPS = [
+  {
+    label: 'Портфель',
+    items: [
+      { to: '/', label: 'Дашборд', end: true },
+      { to: '/positions', label: 'Позиции' },
+      { to: '/transactions', label: 'Сделки' },
+      { to: '/calendar', label: 'Календарь' },
+    ],
+  },
+  {
+    label: 'Аналитика',
+    items: [
+      { to: '/metrics', label: 'Метрики' },
+      { to: '/benchmarks', label: 'Бенчмарки' },
+    ],
+  },
+  {
+    label: 'Инструменты',
+    items: [
+      { to: '/bonds', label: 'Облигации' },
+      { to: '/assets', label: 'Активы' },
+      { to: '/import', label: 'Импорт' },
+    ],
+  },
 ]
+
+function NavDropdown({ label, items }: { label: string; items: typeof NAV_GROUPS[number]['items'] }) {
+  return (
+    <div className="relative group inline-block">
+      <button
+        className="flex items-center gap-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-ink-2 hover:text-ink hover:bg-raised transition"
+      >
+        {label}
+        <span className="text-[10px]">▼</span>
+      </button>
+      <div className="absolute left-0 z-20 top-full w-48 rounded-card border border-line bg-surface p-1 shadow-xl opacity-0 invisible pointer-events-none transition-opacity duration-150 group-hover:opacity-100 group-hover:visible group-hover:pointer-events-auto">
+        {items.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={({ isActive }) =>
+              cx(
+                'block rounded-md px-2.5 py-1.5 text-xs text-ink-2 hover:bg-raised hover:text-ink whitespace-nowrap transition',
+                isActive ? 'bg-raised text-ink' : ''
+              )
+            }
+          >
+            {item.label}
+          </NavLink>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export default function Layout() {
   const { portfolios, selected, setSelected, toggle } = useSelection()
   const { connected } = useQuotes()
   const { resolved, toggle: toggleTheme } = useTheme()
   const [menuOpen, setMenuOpen] = useState(false)
+  const syncAll = useSyncAll()
 
   const visible = selected.length ? portfolios.filter((p) => selected.includes(p.id)) : portfolios
   const totalValue = visible.reduce((sum, p) => sum + p.total_value, 0)
@@ -41,20 +88,8 @@ export default function Layout() {
           </div>
 
           <nav className="order-3 -mx-1 flex w-full gap-0.5 overflow-x-auto md:order-none md:w-auto md:overflow-visible">
-            {NAV.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  cx(
-                    'whitespace-nowrap rounded px-2.5 py-1.5 text-xs font-medium transition',
-                    isActive ? 'bg-raised text-ink' : 'text-ink-2 hover:text-ink',
-                  )
-                }
-              >
-                {item.label}
-              </NavLink>
+            {NAV_GROUPS.map((group) => (
+              <NavDropdown key={group.label} label={group.label} items={group.items} />
             ))}
           </nav>
 
@@ -132,6 +167,13 @@ export default function Layout() {
               />
               <span className="hidden lg:inline">{connected ? 'онлайн' : 'офлайн'}</span>
             </span>
+
+            <Button
+              onClick={() => syncAll.mutate()}
+              disabled={syncAll.isPending}
+            >
+              {syncAll.isPending ? 'Синхронизирую…' : '↻ Обновить'}
+            </Button>
 
             <button
               onClick={toggleTheme}

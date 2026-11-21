@@ -1,7 +1,8 @@
 import { useState } from 'react'
 
+import CorrelationHeatmap from '../components/CorrelationHeatmap'
 import { Card, ErrorBox, Spinner, StatTile, cx } from '../components/ui'
-import { useAllPeriodMetrics, useMetrics } from '../hooks/useApi'
+import { useAllPeriodMetrics, useCorrelationMatrix, useMetrics } from '../hooks/useApi'
 import type { Metrics } from '../lib/api'
 import { daysWord, fmtDate, pct, pctRaw } from '../lib/format'
 import { useSelection } from '../lib/store'
@@ -22,6 +23,7 @@ export default function MetricsPage() {
   const rf = riskFree === '' ? undefined : Number(riskFree) / 100
   const { data, isLoading, error } = useMetrics(period, 'IMOEX', rf)
   const allPeriods = useAllPeriodMetrics('IMOEX')
+  const correlations = useCorrelationMatrix(period)
 
   if (isLoading) return <Spinner />
   if (error) return <ErrorBox error={error} />
@@ -191,6 +193,23 @@ export default function MetricsPage() {
           периода падения рынка акций.
         </p>
       </section>
+
+      <Card
+        title="Корреляция активов"
+        subtitle="Попарная корреляция дневных доходностей за выбранный период. Нажмите на ячейку, чтобы увидеть детали."
+      >
+        {correlations.isLoading ? (
+          <Spinner />
+        ) : correlations.error ? (
+          <ErrorBox error={correlations.error} />
+        ) : !correlations.data?.available ? (
+          <p className="text-sm text-ink-2">
+            {correlations.data?.reason ?? 'Недостаточно данных для матрицы корреляций'}
+          </p>
+        ) : (
+          <CorrelationHeatmap data={correlations.data} />
+        )}
+      </Card>
 
       <Card title="Сравнение по периодам" subtitle="Одни и те же метрики на разных горизонтах">
         {allPeriods.isLoading ? (

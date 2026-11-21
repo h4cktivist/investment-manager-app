@@ -1,13 +1,25 @@
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
 from app.api.deps import DB, not_found
-from app.enums import PaymentKind, PayoutFrequency
+from app.enums import AssetClass, PaymentKind, PayoutFrequency
 from app.models import Asset, PaymentSchedule, PriceHistory, Quote, Transaction
-from app.schemas import AssetOut, AssetSearchResult, AssetUpdate, CustomAssetCreate
-from app.services.market_data import refresh_asset_reference, sync_payment_schedule, sync_price_history
+from app.schemas import (
+    AssetOut,
+    AssetQuoteOut,
+    AssetSearchResult,
+    AssetUpdate,
+    CustomAssetCreate,
+)
+from app.services.market_data import (
+    quote_for_date,
+    refresh_asset_reference,
+    sync_payment_schedule,
+    sync_price_history,
+)
 from app.services.moex import MoexISS
 
 router = APIRouter(prefix="/assets", tags=["Активы"])
@@ -45,6 +57,55 @@ async def search_assets(db: DB, q: str = Query(min_length=2), limit: int = 20):
         for item in found
         if item.get("secid")
     ]
+
+
+@router.get("/quote", response_model=AssetQuoteOut, summary="Цена и НКД на дату")
+async def asset_quote(
+    db: DB,
+    secid: str = Query(min_length=1, description="Тикер инструмента"),
+    when: date = Query(date.today(), alias="date", description="Дата сделки"),
+):
+    """Чистая цена и НКД за единицу — для автозаполнения формы сделки.
+
+    Инструмент может ещё не быть в базе: тогда справочник берётся из ISS,
+    но запись в БД не создаётся — это делает только сохранение сделки.
+    """
+    code = secid.strip().upper()
+    asset = await db.scalar(select(Asset).where(Asset.secid == code))
+
+    async with MoexISS() as iss:
+        if asset is None:
+            info = await iss.security_info(code)
+            if info is None:
+                raise not_found("Актив")
+            view = SimpleNamespace(
+                id=0,
+                secid=code,
+                name=info.get("name") or code,
+                short_name=info.get("short_name"),
+                asset_class=info.get("asset_class") or AssetClass.SHARE.value,
+                engine=info.get("engine"),
+                market=info.get("market"),
+                board=info.get("board"),
+                face_value=info.get("face_value"),
+                initial_face_value=info.get("initial_face_value"),
+                is_custom=False,
+            )
+        else:
+            view = asset
+
+        quote = await quote_for_date(db, view, when, iss=iss)
+
+    return AssetQuoteOut(
+        secid=code,
+        name=view.short_name or view.name,
+        asset_class=view.asset_class,
+        is_bond=view.asset_class == AssetClass.BOND.value,
+        price=quote["price"],
+        accrued_interest=quote["accrued_interest"],
+        as_of=quote["as_of"],
+        source=quote["source"],
+    )
 
 
 @router.post("/custom", response_model=AssetOut, status_code=201, summary="Создать кастомный актив")

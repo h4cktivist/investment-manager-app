@@ -92,6 +92,19 @@ export interface Summary {
   first_transaction: string | null
 }
 
+export interface AssetQuote {
+  secid: string
+  name: string | null
+  asset_class: string
+  is_bond: boolean
+  /** чистая цена за единицу, рубли */
+  price: number | null
+  /** НКД за единицу, рубли */
+  accrued_interest: number | null
+  as_of: string | null
+  source: string | null
+}
+
 export interface Position {
   asset_id: number
   secid: string
@@ -213,6 +226,52 @@ export interface Metrics {
   benchmark_return?: number | null
   excess_return?: number | null
   risk_free_rate?: number
+}
+
+export interface CorrelationAsset {
+  asset_id: number
+  secid: string
+  name: string
+  asset_class: string
+  asset_class_label: string
+  /** доля в рыночной стоимости открытых позиций */
+  weight: number
+  market_value: number
+  observations: number
+  /** годовая волатильность, доля */
+  volatility: number
+}
+
+export interface CorrelationPair {
+  i: number
+  j: number
+  correlation: number
+  /** дневная ковариация доходностей, доли² */
+  covariance: number
+  covariance_annual: number
+  /** то же в процентах в квадрате — так понятнее на экране */
+  covariance_pct2: number
+  covariance_annual_pct2: number
+  observations: number
+  start: string
+  end: string
+}
+
+export interface CorrelationMatrix {
+  available: boolean
+  reason?: string
+  period?: string
+  start?: string
+  end?: string
+  method?: string
+  assets?: CorrelationAsset[]
+  /** null — по паре слишком мало общих наблюдений */
+  correlation?: (number | null)[][]
+  pairs?: CorrelationPair[]
+  total_assets?: number
+  truncated?: boolean
+  excluded_no_history?: number
+  min_observations?: number
 }
 
 export interface BondItem {

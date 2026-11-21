@@ -1,9 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button, Card, cx } from '../components/ui'
-import { api, qs, type AssetSearchResult, type Transaction } from '../lib/api'
-import { TX_LABELS, rub } from '../lib/format'
+import {
+  api,
+  qs,
+  type AssetQuote,
+  type AssetSearchResult,
+  type Position,
+  type Transaction,
+} from '../lib/api'
+import { TX_LABELS, num, rub } from '../lib/format'
 import { useSelection } from '../lib/store'
 
 const NO_ASSET = new Set(['DEPOSIT', 'WITHDRAWAL', 'TAX', 'FEE'])
@@ -67,13 +74,21 @@ export default function TransactionForm({
   const [form, setForm] = useState<FormState>(() => initialState(defaultPortfolio, transaction))
   const [searchTerm, setSearchTerm] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [lookupEnabled, setLookupEnabled] = useState(false)
+  // какие поля заполнены автоматически — ручной ввод важнее
+  const autoPrice = useRef(false)
+  const autoNkd = useRef(false)
 
   const isEdit = Boolean(transaction)
+  const isSell = form.type === 'SELL'
   const needsAsset = !NO_ASSET.has(form.type)
   const showQty = QTY_TYPES.has(form.type)
 
   useEffect(() => {
     setForm(initialState(defaultPortfolio, transaction))
+    autoPrice.current = false
+    autoNkd.current = false
+    setLookupEnabled(false)
   }, [transaction, defaultPortfolio])
 
   const { data: found = [] } = useQuery({
@@ -83,12 +98,145 @@ export default function TransactionForm({
     staleTime: 300_000,
   })
 
+  const { data: held = [] } = useQuery({
+    queryKey: ['positions-form', form.portfolio_id],
+    queryFn: () =>
+      api.get<Position[]>(`/portfolio/positions${qs({ portfolio_id: [form.portfolio_id] })}`),
+    enabled: isSell && form.portfolio_id > 0,
+    staleTime: 30_000,
+  })
+
+  const bondQuote = useQuery({
+    queryKey: ['asset-quote', form.secid, form.executed_at],
+    queryFn: () =>
+      api.get<AssetQuote>(
+        `/assets/quote${qs({
+          secid: form.secid.trim().toUpperCase(),
+          date: form.executed_at,
+        })}`,
+      ),
+    enabled:
+      lookupEnabled &&
+      needsAsset &&
+      !isEdit &&
+      form.secid.trim().length >= 2 &&
+      (form.type === 'BUY' || form.type === 'SELL'),
+    staleTime: 300_000,
+    retry: false,
+  })
+
+  useEffect(() => {
+    const quote = bondQuote.data
+    if (!quote?.is_bond) return
+    setForm((prev) => {
+      const next = { ...prev }
+      if (quote.price !== null && (!prev.price || autoPrice.current)) {
+        next.price = String(quote.price)
+        autoPrice.current = true
+      }
+      if (
+        quote.accrued_interest !== null &&
+        (!prev.accrued_interest || autoNkd.current)
+      ) {
+        next.accrued_interest = String(quote.accrued_interest)
+        autoNkd.current = true
+      }
+      return next
+    })
+  }, [bondQuote.data])
+
+  const selectedHolding = held.find((item) => item.secid === form.secid)
+
+  const bond = bondQuote.data
+  const isBond = Boolean(bond?.is_bond)
+
   const computedAmount = useMemo(() => {
     const price = Number(form.price) || 0
     const qty = Number(form.quantity) || 0
+    const nkd = Number(form.accrued_interest) || 0
     if (form.amount) return Number(form.amount)
-    return showQty ? price * qty : price
-  }, [form.price, form.quantity, form.amount, showQty])
+    if (showQty) {
+      // НКД платится за каждую бумагу — входит в общую стоимость покупки
+      return price * qty + (isBond ? nkd * qty : 0)
+    }
+    return price
+  }, [form.price, form.quantity, form.accrued_interest, form.amount, showQty, isBond])
+
+  const chooseAsset = (secid: string) => {
+    autoPrice.current = false
+    autoNkd.current = false
+    setForm((prev) => ({
+      ...prev,
+      secid,
+      // цена и НКД относятся к конкретной бумаге — старые значения не переносим
+      price: '',
+      accrued_interest: '',
+      amount: '',
+    }))
+    setSearchTerm('')
+    setLookupEnabled(true)
+  }
+
+  const changeType = (type: string) => {
+    const switchingToSell = type === 'SELL'
+    setForm((prev) => ({
+      ...prev,
+      type,
+      secid: switchingToSell ? '' : prev.secid,
+      quantity: switchingToSell ? '' : prev.quantity,
+      price: switchingToSell ? '' : prev.price,
+      accrued_interest: switchingToSell ? '' : prev.accrued_interest,
+      amount: switchingToSell ? '' : prev.amount,
+    }))
+    autoPrice.current = false
+    autoNkd.current = false
+    setLookupEnabled(!switchingToSell)
+    setSearchTerm('')
+    setError(null)
+  }
+
+  const changePortfolio = (portfolioId: number) => {
+    if (isSell) {
+      autoPrice.current = false
+      autoNkd.current = false
+      setLookupEnabled(false)
+      setForm((prev) => ({
+        ...prev,
+        portfolio_id: portfolioId,
+        secid: '',
+        price: '',
+        accrued_interest: '',
+        amount: '',
+      }))
+      return
+    }
+    setForm((prev) => ({ ...prev, portfolio_id: portfolioId }))
+  }
+
+  const changeSecid = (raw: string) => {
+    const value = raw.toUpperCase()
+    if (value !== form.secid) {
+      autoPrice.current = false
+      autoNkd.current = false
+      setForm((prev) => ({
+        ...prev,
+        secid: value,
+        price: '',
+        accrued_interest: '',
+        amount: '',
+      }))
+    } else {
+      setForm((prev) => ({ ...prev, secid: value }))
+    }
+    setSearchTerm(raw)
+    setLookupEnabled(false)
+  }
+
+  const changeManual = (key: 'price' | 'accrued_interest') => (e: { target: { value: string } }) => {
+    if (key === 'price') autoPrice.current = false
+    else autoNkd.current = false
+    setForm((prev) => ({ ...prev, [key]: e.target.value }))
+  }
 
   const save = useMutation({
     mutationFn: async () => {
@@ -140,8 +288,29 @@ export default function TransactionForm({
           e.preventDefault()
           setError(null)
           if (needsAsset && !form.secid.trim()) {
-            setError('Укажите тикер инструмента')
+            setError(isSell ? 'Выберите бумагу для продажи' : 'Укажите тикер инструмента')
             return
+          }
+          if (isSell && !isEdit) {
+            const quantity = Number(form.quantity) || 0
+            if (quantity <= 0) {
+              setError('Количество в продаже должно быть больше нуля')
+              return
+            }
+            // текущий остаток применим только к сегодняшней или будущей дате;
+            // для исторической сделки решение принимает бэкенд по остатку на дату
+            if (form.executed_at >= new Date().toISOString().slice(0, 10)) {
+              if (!selectedHolding) {
+                setError('В портфеле нет такой бумаги')
+                return
+              }
+              if (quantity > selectedHolding.quantity + 1e-9) {
+                setError(
+                  `В портфеле только ${num(selectedHolding.quantity, 4)} ${selectedHolding.secid}`,
+                )
+                return
+              }
+            }
           }
           save.mutate()
         }}
@@ -150,7 +319,7 @@ export default function TransactionForm({
         <Field label="Портфель">
           <select
             value={form.portfolio_id}
-            onChange={(e) => setForm((p) => ({ ...p, portfolio_id: Number(e.target.value) }))}
+            onChange={(e) => changePortfolio(Number(e.target.value))}
             disabled={isEdit}
             className={inputClass}
           >
@@ -163,7 +332,7 @@ export default function TransactionForm({
         </Field>
 
         <Field label="Операция">
-          <select value={form.type} onChange={set('type')} className={inputClass}>
+          <select value={form.type} onChange={(e) => changeType(e.target.value)} className={inputClass}>
             {Object.entries(TX_LABELS).map(([value, label]) => (
               <option key={value} value={value}>
                 {label}
@@ -176,14 +345,36 @@ export default function TransactionForm({
           <input type="date" value={form.executed_at} onChange={set('executed_at')} className={inputClass} />
         </Field>
 
-        {needsAsset && (
+        {needsAsset && isSell && !isEdit ? (
+          <Field
+            label="Инструмент"
+            hint={
+              held.length > 0
+                ? 'продать можно только бумаги из портфеля'
+                : 'в портфеле нет открытых позиций'
+            }
+          >
+            <select
+              value={form.secid}
+              onChange={(e) => chooseAsset(e.target.value)}
+              className={inputClass}
+            >
+              <option value="">— выберите бумагу —</option>
+              {held.map((position) => (
+                <option key={position.asset_id} value={position.secid}>
+                  {position.secid} — {position.name} (остаток {num(position.quantity, 4)})
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : needsAsset ? (
           <Field label="Тикер" hint={isEdit ? undefined : 'начните вводить название или код'}>
             <input
               value={form.secid}
               disabled={isEdit}
-              onChange={(e) => {
-                setForm((p) => ({ ...p, secid: e.target.value.toUpperCase() }))
-                setSearchTerm(e.target.value)
+              onChange={(e) => changeSecid(e.target.value)}
+              onBlur={() => {
+                if (!isEdit && form.secid.trim().length >= 2) setLookupEnabled(true)
               }}
               placeholder="SBER, RU000A10C5K9…"
               className={inputClass}
@@ -194,10 +385,7 @@ export default function TransactionForm({
                   <li key={item.secid}>
                     <button
                       type="button"
-                      onClick={() => {
-                        setForm((p) => ({ ...p, secid: item.secid }))
-                        setSearchTerm('')
-                      }}
+                      onClick={() => chooseAsset(item.secid)}
                       className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-2xs hover:bg-raised"
                     >
                       <span className="truncate text-ink">{item.short_name ?? item.name}</span>
@@ -208,20 +396,34 @@ export default function TransactionForm({
               </ul>
             )}
           </Field>
-        )}
+        ) : null}
 
-        <Field label={form.type === 'SPLIT' ? 'Коэффициент сплита' : 'Цена за штуку'}>
+        <Field
+          label={form.type === 'SPLIT' ? 'Коэффициент сплита' : 'Цена за штуку'}
+          hint={
+            bondQuote.data?.is_bond && (autoPrice.current || autoNkd.current)
+              ? 'подтянуто с Мосбиржи на дату'
+              : undefined
+          }
+        >
           <input
             type="number"
             step="any"
             value={form.price}
-            onChange={set('price')}
+            onChange={changeManual('price')}
             className={inputClass}
           />
         </Field>
 
         {showQty && form.type !== 'SPLIT' && (
-          <Field label="Количество">
+          <Field
+            label="Количество"
+            hint={
+              isSell && !isEdit && selectedHolding
+                ? `в портфеле: ${num(selectedHolding.quantity, 4)}`
+                : undefined
+            }
+          >
             <input
               type="number"
               step="any"
@@ -234,7 +436,11 @@ export default function TransactionForm({
 
         <Field
           label="Сумма"
-          hint={form.amount ? undefined : `расчётная: ${rub(computedAmount)}`}
+          hint={form.amount
+            ? undefined
+            : isBond && showQty
+              ? `расчётная: ${rub(computedAmount)} (цена × qty + НКД × qty)`
+              : `расчётная: ${rub(computedAmount)}`}
         >
           <input
             type="number"
@@ -254,12 +460,21 @@ export default function TransactionForm({
           <input type="number" step="any" value={form.tax} onChange={set('tax')} className={inputClass} />
         </Field>
 
-        <Field label="НКД" hint="накопленный купонный доход">
+        <Field
+          label="НКД"
+          hint={
+            bondQuote.data?.is_bond && autoNkd.current
+              ? 'накопленный купонный доход — подтянут автоматически'
+              : isBond
+                ? 'накопленный купонный доход за единицу — умножается на количество'
+                : 'накопленный купонный доход'
+          }
+        >
           <input
             type="number"
             step="any"
             value={form.accrued_interest}
-            onChange={set('accrued_interest')}
+            onChange={changeManual('accrued_interest')}
             className={inputClass}
           />
         </Field>

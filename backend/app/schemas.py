@@ -130,6 +130,17 @@ class AssetSearchResult(BaseModel):
     in_portfolio: bool = False
 
 
+class AssetQuoteOut(BaseModel):
+    secid: str
+    name: str | None = None
+    asset_class: str
+    is_bond: bool = False
+    price: float | None = Field(default=None, description="Чистая цена за единицу, рубли")
+    accrued_interest: float | None = Field(default=None, description="НКД за единицу, рубли")
+    as_of: date | None = None
+    source: str | None = None
+
+
 # ------------------------------------------------------------------- сделки
 
 

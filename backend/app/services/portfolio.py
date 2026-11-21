@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -141,7 +141,8 @@ def replay(transactions: list[Transaction], auto_fund: bool = True) -> LedgerRes
 
             if tx_type == TxType.BUY.value and pos is not None:
                 gross = amount or price * qty
-                total_cost = gross + fee + nkd
+                # НКД указывается за единицу — в общую стоимость входит nkd × qty
+                total_cost = gross + fee + nkd * qty
                 if qty > EPS:
                     pos.lots.append(
                         Lot(
@@ -163,7 +164,7 @@ def replay(transactions: list[Transaction], auto_fund: bool = True) -> LedgerRes
 
             elif tx_type == TxType.SELL.value and pos is not None:
                 gross = amount or price * qty
-                proceeds = gross - fee + nkd
+                proceeds = gross - fee + nkd * qty
                 cost_removed = _consume_fifo(pos, qty)
                 pos.realized_pnl += proceeds - cost_removed
                 pos.fees += fee
@@ -271,6 +272,29 @@ def replay(transactions: list[Transaction], auto_fund: bool = True) -> LedgerRes
     result.external_flows = external_flows
     result.realized_pnl = sum(p.realized_pnl for p in positions.values())
     return result
+
+
+def available_quantity(
+    transactions: list[Transaction],
+    asset_id: int,
+    before: tuple[datetime, float],
+    exclude_id: int | None = None,
+) -> float:
+    """Сколько бумаг было в портфеле непосредственно перед сделкой.
+
+    ``before`` — позиция сделки в общем порядке ``(executed_at, id)``. Для новой
+    записи вторым элементом передаётся ``inf``: у неё ещё нет id, и все сделки
+    того же дня уже состоялись раньше. ``exclude_id`` исключает из расчёта
+    редактируемую сделку, чтобы её старое количество не попало в остаток.
+    """
+    earlier = [
+        tx
+        for tx in transactions
+        if (exclude_id is None or tx.id != exclude_id)
+        and (tx.executed_at, tx.id or 0) < before
+    ]
+    position = replay(earlier).positions.get(asset_id)
+    return position.qty if position is not None else 0.0
 
 
 def _consume_fifo(pos: Position, qty: float) -> float:

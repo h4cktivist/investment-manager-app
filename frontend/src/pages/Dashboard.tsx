@@ -59,6 +59,15 @@ export default function Dashboard() {
   const currentMonth = new Date().toISOString().slice(0, 7)
   const upcomingSoon = upcoming_payments.slice(0, 7)
 
+  const gainers = data.positions
+    .filter((p) => (p.day_change ?? 0) > 0)
+    .sort((a, b) => (b.day_change ?? 0) - (a.day_change ?? 0))
+    .slice(0, 5)
+  const losers = data.positions
+    .filter((p) => (p.day_change ?? 0) < 0)
+    .sort((a, b) => (a.day_change ?? 0) - (b.day_change ?? 0))
+    .slice(0, 5)
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -109,6 +118,43 @@ export default function Dashboard() {
           hint={`Получено за всё время: ${rub(summary.income + summary.amortization, 0)}`}
         />
       </div>
+    
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <StatTile label="Волатильность" value={pct(metrics.volatility)} hint="годовая, по торговым дням" />
+        <StatTile
+          label="Макс. просадка"
+          value={<span className="text-[var(--critical)]">{pct(metrics.max_drawdown)}</span>}
+          hint={
+            metrics.max_drawdown_start
+              ? `${fmtDate(metrics.max_drawdown_start)} → ${fmtDate(metrics.max_drawdown_end)}`
+              : undefined
+          }
+        />
+        <StatTile
+          label="Коэф. Шарпа"
+          value={metrics.sharpe !== null && metrics.sharpe !== undefined ? metrics.sharpe.toFixed(2) : '—'}
+          hint={`безриск. ставка ${pctRaw((data.risk_free_rate ?? 0) * 100, 1)}`}
+        />
+        <StatTile
+          label="Коэф. Сортино"
+          value={metrics.sortino !== null && metrics.sortino !== undefined ? metrics.sortino.toFixed(2) : '—'}
+          hint="учитывает только падения"
+        />
+        <StatTile
+          label="Бета к IMOEX"
+          value={metrics.beta !== null && metrics.beta !== undefined ? metrics.beta.toFixed(2) : '—'}
+          hint={
+            metrics.correlation !== null && metrics.correlation !== undefined
+              ? `корреляция ${metrics.correlation.toFixed(2)}`
+              : undefined
+          }
+        />
+        <StatTile
+          label="XIRR"
+          value={pct(metrics.xirr)}
+          hint="денежно-взвешенная годовая"
+        />
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Card
@@ -124,7 +170,67 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      <PassiveIncomeCard data={passive_income} />
+      <Card
+        title="Лидеры и аутсайдеры дня"
+        subtitle="По изменению стоимости позиции за день, ₽"
+      >
+        {gainers.length === 0 && losers.length === 0 ? (
+          <p className="py-6 text-center text-xs text-muted">
+            Нет данных об изменении стоимости за день
+          </p>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="rounded-card border border-line p-3">
+              <h3 className="text-xs font-semibold text-[var(--good-text)] mb-2">
+                Выросли
+              </h3>
+              <ul className="space-y-2">
+                {gainers.map((p) => (
+                  <li key={p.asset_id} className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-ink truncate">
+                        {p.name}
+                      </div>
+                      <div className="text-2xs text-muted truncate">
+                        {p.secid}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="tnum text-xs font-semibold text-[var(--good-text)]">
+                        +{rub(p.day_change, 0)}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="rounded-card border border-line p-3">
+              <h3 className="text-xs font-semibold text-[var(--critical)] mb-2">
+                Упали
+              </h3>
+              <ul className="space-y-2">
+                {losers.map((p) => (
+                  <li key={p.asset_id} className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-ink truncate">
+                        {p.name}
+                      </div>
+                      <div className="text-2xs text-muted truncate">
+                        {p.secid}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="tnum text-xs font-semibold text-[var(--critical)]">
+                        {rub(p.day_change, 0)}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+      </Card>
 
       <Card
         title="Доходность против индексов Мосбиржи"
@@ -132,6 +238,8 @@ export default function Dashboard() {
       >
         <ReturnComparisonChart points={performance.points} benchmarks={performance.benchmarks} />
       </Card>
+
+      <PassiveIncomeCard data={passive_income} />
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Card
@@ -191,47 +299,10 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-        <StatTile label="Волатильность" value={pct(metrics.volatility)} hint="годовая, по торговым дням" />
-        <StatTile
-          label="Макс. просадка"
-          value={<span className="text-[var(--critical)]">{pct(metrics.max_drawdown)}</span>}
-          hint={
-            metrics.max_drawdown_start
-              ? `${fmtDate(metrics.max_drawdown_start)} → ${fmtDate(metrics.max_drawdown_end)}`
-              : undefined
-          }
-        />
-        <StatTile
-          label="Коэф. Шарпа"
-          value={metrics.sharpe !== null && metrics.sharpe !== undefined ? metrics.sharpe.toFixed(2) : '—'}
-          hint={`безриск. ставка ${pctRaw((data.risk_free_rate ?? 0) * 100, 1)}`}
-        />
-        <StatTile
-          label="Коэф. Сортино"
-          value={metrics.sortino !== null && metrics.sortino !== undefined ? metrics.sortino.toFixed(2) : '—'}
-          hint="учитывает только падения"
-        />
-        <StatTile
-          label="Бета к IMOEX"
-          value={metrics.beta !== null && metrics.beta !== undefined ? metrics.beta.toFixed(2) : '—'}
-          hint={
-            metrics.correlation !== null && metrics.correlation !== undefined
-              ? `корреляция ${metrics.correlation.toFixed(2)}`
-              : undefined
-          }
-        />
-        <StatTile
-          label="XIRR"
-          value={pct(metrics.xirr)}
-          hint="денежно-взвешенная годовая"
-        />
-      </div>
-
       {macro?.available && (
         <Card
           title="Макроэкономика"
-          subtitle="Ключевая ставка, инфляция и доходность ОФЗ — бесплатные данные ЦБ РФ и Мосбиржи"
+          subtitle="Ключевая ставка, инфляция и доходность ОФЗ"
         >
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {macro.key_rate && (

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import AssetClass, PaymentKind
 from app.models import Asset, Benchmark, BenchmarkPrice, PaymentSchedule, PriceHistory, Transaction
-from app.services.moex import MoexISS, normalize_price
+from app.services.moex import MoexError, MoexISS, normalize_price
 
 log = logging.getLogger(__name__)
 
@@ -390,3 +390,92 @@ async def face_value_at(session: AsyncSession, asset: Asset, when: date) -> floa
     )
     repaid = sum(float(v) for v in rows.all())
     return max(initial - repaid, 0.0)
+
+
+async def quote_for_date(
+    session: AsyncSession,
+    asset: Asset,
+    when: date,
+    iss: MoexISS | None = None,
+    include_live: bool = True,
+) -> dict:
+    """Чистая цена и НКД за единицу на дату (или последнюю известную до неё).
+
+    Для сегодняшней даты сначала пробуем живую котировку: НКД растёт каждый день,
+    и вчерашнее значение на сегодня уже неверно. Для прошедших дат берём
+    локальную историю, а если её нет — добираем из ISS.
+    """
+    when = min(when, date.today())
+    empty = {"price": None, "accrued_interest": None, "as_of": None, "source": None}
+
+    if asset.is_custom or not asset.engine or not asset.market:
+        return empty
+
+    face = float(asset.face_value or asset.initial_face_value or 0) or None
+
+    if when >= date.today() and include_live and iss is not None:
+        try:
+            ticks = await iss.market_data(asset.engine, asset.market, asset.board, [asset.secid])
+        except MoexError as exc:
+            log.warning("market_data(%s): %s", asset.secid, exc)
+            ticks = {}
+        tick = ticks.get(asset.secid)
+        if tick and tick.get("price"):
+            return {
+                "price": normalize_price(
+                    asset.asset_class, tick["price"], tick.get("face_value") or face
+                ),
+                "accrued_interest": tick.get("accrued_interest") or 0.0,
+                "as_of": when,
+                "source": "iss_quote",
+            }
+
+    row = (
+        await session.execute(
+            select(
+                PriceHistory.date,
+                PriceHistory.close_norm,
+                PriceHistory.accrued_interest,
+            )
+            .where(PriceHistory.asset_id == asset.id, PriceHistory.date <= when)
+            .order_by(PriceHistory.date.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is not None and row[1]:
+        return {
+            "price": float(row[1]),
+            "accrued_interest": float(row[2] or 0),
+            "as_of": row[0],
+            "source": "history",
+        }
+
+    if iss is None:
+        return empty
+
+    try:
+        rows = await iss.history(
+            asset.engine,
+            asset.market,
+            asset.secid,
+            when - timedelta(days=45),
+            when,
+            board=asset.board,
+        )
+    except MoexError as exc:
+        log.warning("history(%s): %s", asset.secid, exc)
+        return empty
+    if not rows:
+        return empty
+
+    last = next((row for row in reversed(rows) if row.get("close")), None)
+    if last is None:
+        return empty
+    return {
+        "price": normalize_price(
+            asset.asset_class, last["close"], last.get("face_value") or face
+        ),
+        "accrued_interest": last.get("accrued_interest") or 0.0,
+        "as_of": last["date"],
+        "source": "iss_history",
+    }

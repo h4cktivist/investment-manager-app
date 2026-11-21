@@ -7,6 +7,7 @@ import {
   type BookPaymentResult,
   type BondsResponse,
   type CalendarResponse,
+  type CorrelationMatrix,
   type Dashboard,
   type Metrics,
   type Performance,
@@ -81,6 +82,21 @@ export function useMetrics(period: string, benchmark = 'IMOEX', riskFree?: numbe
     queryFn: () =>
       api.get<Metrics>(
         `/portfolio/metrics${qs({ portfolio_id: selected, period, benchmark, risk_free: riskFree })}`,
+      ),
+  })
+}
+
+export function useCorrelationMatrix(period: string, maxAssets = 15) {
+  const { selected } = useScope()
+  return useQuery({
+    queryKey: ['correlation', selected, period, maxAssets],
+    queryFn: () =>
+      api.get<CorrelationMatrix>(
+        `/portfolio/correlation${qs({
+          portfolio_id: selected,
+          period,
+          max_assets: maxAssets,
+        })}`,
       ),
   })
 }
@@ -163,5 +179,15 @@ export function usePaymentsHistory() {
         total: number
         by_month: { month: string; amount: number }[]
       }>(`/calendar/history${scope}`),
+  })
+}
+
+/** Синхронизировать справочники, историю цен и купонные графики с Мосбиржи. */
+export function useSyncAll() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      api.post('/sync', { with_history: true, with_schedule: true, with_benchmarks: true }),
+    onSuccess: () => queryClient.invalidateQueries(),
   })
 }
