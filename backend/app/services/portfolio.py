@@ -334,6 +334,8 @@ class PriceBook:
 
     series: dict[int, list[tuple[date, float]]]
     live: dict[int, float]
+    #: (дата, чистая цена, НКД) — чтобы взять НКД именно прошлого закрытия
+    history: dict[int, list[tuple[date, float, float]]] = field(default_factory=dict)
 
     def value_at(self, asset_id: int, day: date) -> float | None:
         """Последняя котировка на дату или None, если данных нет."""
@@ -350,6 +352,30 @@ class PriceBook:
             else:
                 hi = mid - 1
         return best
+
+    def previous_clean(
+        self, asset_id: int, current_clean: float | None = None
+    ) -> float | None:
+        """Чистая цена предыдущего закрытия — база изменения за день.
+
+        Брокеры считают дневное изменение по чистой цене: НКД начисляется
+        каждый день и в «изменение за день» не входит (он показывается отдельно
+        или прибавляется к стоимости). Поэтому база — только ``close_norm``.
+
+        Нужен как запасной вариант, когда провайдер не отдал ``prev_close``.
+        Если текущая цена уже равна последнему закрытию (вечер, выходной),
+        предыдущим считается закрытие до него — иначе изменение было бы нулевым.
+        """
+        rows = self.history.get(asset_id)
+        if not rows:
+            return None
+        last_clean = rows[-1][1]
+        if current_clean is None:
+            return last_clean
+        tolerance = max(0.01, abs(last_clean) * 1e-5)
+        if len(rows) >= 2 and abs(current_clean - last_clean) <= tolerance:
+            return rows[-2][1]
+        return last_clean
 
     def latest(self, asset_id: int) -> float:
         if asset_id in self.live:
@@ -387,11 +413,12 @@ async def load_price_book(
     ).all()
 
     series: dict[int, list[tuple[date, float]]] = defaultdict(list)
+    history: dict[int, list[tuple[date, float, float]]] = defaultdict(list)
     for asset_id, day, close_norm, accint in rows:
-        value = f(close_norm)
-        if include_accrued and accint is not None:
-            value += f(accint)
-        series[asset_id].append((day, value))
+        clean = f(close_norm)
+        accrued = f(accint) if accint is not None else 0.0
+        series[asset_id].append((day, clean + (accrued if include_accrued else 0.0)))
+        history[asset_id].append((day, clean, accrued))
 
     quotes = (
         await session.scalars(select(Quote).where(Quote.asset_id.in_(asset_ids)))
@@ -425,7 +452,7 @@ async def load_price_book(
             series[asset_id] = [(date(1970, 1, 1), f(asset.manual_price))]
             live[asset_id] = f(asset.manual_price)
 
-    return PriceBook(series=dict(series), live=live)
+    return PriceBook(series=dict(series), live=live, history=dict(history))
 
 
 def custom_asset_price(asset: Asset, when: date) -> float:

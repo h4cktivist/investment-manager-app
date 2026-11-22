@@ -228,6 +228,57 @@ export interface Metrics {
   risk_free_rate?: number
 }
 
+export interface MonteCarloPoint {
+  day: number
+  date: string
+  /** юбилейные квантили стоимости портфеля по всем сценариям */
+  p5: number
+  p25: number
+  p50: number
+  p75: number
+  p95: number
+  mean: number
+}
+
+export interface MonteCarloFinal {
+  p5: number
+  p25: number
+  p50: number
+  p75: number
+  p95: number
+  mean: number
+  min: number
+  max: number
+}
+
+export interface MonteCarlo {
+  available: boolean
+  reason?: string
+  period?: string
+  horizon?: string
+  horizon_days?: number
+  simulations?: number
+  observations?: number
+  method?: string
+  start?: string
+  end?: string
+  initial_value?: number
+  /** годовая волатильность, доля */
+  annual_volatility?: number
+  probability_of_loss?: number
+  probability_of_loss_10?: number
+  /** убыток на горизонте, рубли: 95% сценариев не хуже этой границы */
+  var_95?: number
+  var_95_pct?: number
+  es_95?: number
+  es_95_pct?: number
+  expected_return?: number
+  median_return?: number
+  final?: MonteCarloFinal
+  returns?: MonteCarloFinal
+  points?: MonteCarloPoint[]
+}
+
 export interface CorrelationAsset {
   asset_id: number
   secid: string

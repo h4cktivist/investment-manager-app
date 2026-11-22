@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from datetime import date
 
@@ -17,6 +18,14 @@ from app.services.portfolio import ValuationPoint
 
 EPS = 1e-12
 TRADING_DAYS = 252
+
+#: меньше 30 наблюдений — бутстрэп даёт слишком грубую картину
+MIN_MONTE_CARLO_OBSERVATIONS = 30
+#: фиксированное зерно: при одном и том же наборе данных график не «прыгает»
+MONTE_CARLO_SEED = 20240517
+MONTE_CARLO_MAX_SIMULATIONS = 5000
+#: горизонты симуляции в торговых днях
+MC_HORIZONS = {"1M": 21, "3M": 63, "6M": 126, "1Y": 252, "3Y": 756}
 
 
 @dataclass
@@ -190,6 +199,117 @@ def pair_statistics(a: list[float], b: list[float]) -> dict | None:
         "correlation": corr,
         "covariance": cov,
         "covariance_annual": cov * TRADING_DAYS,
+    }
+
+
+def monte_carlo_forecast(
+    daily: list[float],
+    initial_value: float,
+    horizon_days: int,
+    simulations: int = 1000,
+    seed: int = MONTE_CARLO_SEED,
+) -> dict | None:
+    """Бутстрэп-симуляция стоимости портфеля на горизонте вперёд.
+
+    Дневные доходности выбираются из исторического ряда случайно и с
+    возвращением. В отличие от нормального распределения бутстрэп сохраняет
+    реальные «толстые хвосты» и асимметрию: редкие обвалы выпадают с той же
+    частотой, с какой случались в истории портфеля. Начальная стоимость —
+    текущая оценка портфеля, поэтому результат читается в рублях.
+
+    Возвращает None, если истории недостаточно для осмысленной оценки.
+    """
+    observations = len(daily)
+    if observations < MIN_MONTE_CARLO_OBSERVATIONS or initial_value <= EPS or horizon_days < 1:
+        return None
+
+    simulations = max(1, min(int(simulations), MONTE_CARLO_MAX_SIMULATIONS))
+    rng = random.Random(seed)
+
+    paths: list[list[float]] = []
+    finals: list[float] = []
+    for _ in range(simulations):
+        value = initial_value
+        path: list[float] = []
+        for _ in range(horizon_days):
+            value *= 1.0 + daily[rng.randrange(observations)]
+            if value < 0.0:
+                value = 0.0
+            path.append(value)
+        paths.append(path)
+        finals.append(value)
+
+    # проценты считаем по каждому дню поперёк всех сценариев
+    columns = zip(*paths)
+    points: list[dict] = [
+        {
+            "day": 0,
+            "p5": round(initial_value, 2),
+            "p25": round(initial_value, 2),
+            "p50": round(initial_value, 2),
+            "p75": round(initial_value, 2),
+            "p95": round(initial_value, 2),
+            "mean": round(initial_value, 2),
+        }
+    ]
+    for day, column in enumerate(columns, start=1):
+        values = list(column)
+        points.append(
+            {
+                "day": day,
+                "p5": round(percentile(values, 0.05), 2),
+                "p25": round(percentile(values, 0.25), 2),
+                "p50": round(percentile(values, 0.50), 2),
+                "p75": round(percentile(values, 0.75), 2),
+                "p95": round(percentile(values, 0.95), 2),
+                "mean": round(sum(values) / simulations, 2),
+            }
+        )
+
+    final = {
+        "p5": percentile(finals, 0.05),
+        "p25": percentile(finals, 0.25),
+        "p50": percentile(finals, 0.50),
+        "p75": percentile(finals, 0.75),
+        "p95": percentile(finals, 0.95),
+        "mean": sum(finals) / simulations,
+        "min": min(finals),
+        "max": max(finals),
+    }
+    returns = {
+        key: (value / initial_value - 1.0) if initial_value > EPS else None
+        for key, value in final.items()
+    }
+
+    losses = sum(1 for value in finals if value < initial_value - EPS)
+    deep_losses = sum(1 for value in finals if value < initial_value * 0.9 - EPS)
+
+    # VaR/ES на горизонте — в рублях и как доля начальной стоимости.
+    # Если даже 5%-й квантиль выше старта, риск убытка считаем нулевым.
+    var_value = max(initial_value - final["p5"], 0.0)
+    tail = [value for value in finals if value <= final["p5"]]
+    es_value = max(initial_value - (sum(tail) / len(tail)), 0.0) if tail else var_value
+
+    return {
+        "simulations": simulations,
+        "observations": observations,
+        "horizon_days": horizon_days,
+        "initial_value": round(initial_value, 2),
+        "annual_volatility": volatility(daily),
+        "probability_of_loss": losses / simulations,
+        "probability_of_loss_10": deep_losses / simulations,
+        "var_95": var_value,
+        "var_95_pct": var_value / initial_value if initial_value > EPS else None,
+        "es_95": es_value,
+        "es_95_pct": es_value / initial_value if initial_value > EPS else None,
+        "expected_return": returns["mean"],
+        "median_return": returns["p50"],
+        "final": {key: round(value, 2) for key, value in final.items()},
+        "returns": {
+            key: round(value, 6) if value is not None else None
+            for key, value in returns.items()
+        },
+        "points": points,
     }
 
 

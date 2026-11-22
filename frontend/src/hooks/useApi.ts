@@ -10,6 +10,7 @@ import {
   type CorrelationMatrix,
   type Dashboard,
   type Metrics,
+  type MonteCarlo,
   type Performance,
   type Position,
   type Summary,
@@ -96,6 +97,22 @@ export function useCorrelationMatrix(period: string, maxAssets = 15) {
           portfolio_id: selected,
           period,
           max_assets: maxAssets,
+        })}`,
+      ),
+  })
+}
+
+export function useMonteCarlo(period: string, horizon: string, simulations = 1000) {
+  const { selected } = useScope()
+  return useQuery({
+    queryKey: ['monte-carlo', selected, period, horizon, simulations],
+    queryFn: () =>
+      api.get<MonteCarlo>(
+        `/portfolio/monte-carlo${qs({
+          portfolio_id: selected,
+          period,
+          horizon,
+          simulations,
         })}`,
       ),
   })

@@ -400,11 +400,6 @@ export default function TransactionForm({
 
         <Field
           label={form.type === 'SPLIT' ? 'Коэффициент сплита' : 'Цена за штуку'}
-          hint={
-            bondQuote.data?.is_bond && (autoPrice.current || autoNkd.current)
-              ? 'подтянуто с Мосбиржи на дату'
-              : undefined
-          }
         >
           <input
             type="number"
@@ -439,7 +434,7 @@ export default function TransactionForm({
           hint={form.amount
             ? undefined
             : isBond && showQty
-              ? `расчётная: ${rub(computedAmount)} (цена × qty + НКД × qty)`
+              ? `расчётная: ${rub(computedAmount)}`
               : `расчётная: ${rub(computedAmount)}`}
         >
           <input
@@ -464,9 +459,9 @@ export default function TransactionForm({
           label="НКД"
           hint={
             bondQuote.data?.is_bond && autoNkd.current
-              ? 'накопленный купонный доход — подтянут автоматически'
+              ? 'накопленный купонный доход'
               : isBond
-                ? 'накопленный купонный доход за единицу — умножается на количество'
+                ? 'накопленный купонный доход за единицу'
                 : 'накопленный купонный доход'
           }
         >

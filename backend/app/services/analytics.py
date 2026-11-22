@@ -143,9 +143,17 @@ class PortfolioAnalytics:
             prev_norm = None
             if quote and quote.prev_close is not None:
                 prev_norm = normalize_price(asset.asset_class, f(quote.prev_close), face)
-                if accrued:
-                    prev_norm += accrued
-            day_change = (price - prev_norm) * pos.qty if prev_norm else 0.0
+            if prev_norm is None:
+                prev_norm = self.prices.previous_clean(asset_id, clean_price)
+            # Как в брокерском отчёте: изменение только по чистой цене.
+            # НКД начисляется каждый день и в дневное изменение не входит —
+            # иначе перед купоном («обнуление» НКД) получается ложный минус.
+            day_change = (clean_price - prev_norm) * pos.qty if prev_norm else 0.0
+            day_change_pct = (
+                clean_price / prev_norm - 1.0 if prev_norm and prev_norm > EPS else None
+            )
+            if day_change_pct is None and quote and quote.change_pct is not None:
+                day_change_pct = f(quote.change_pct) / 100
 
             is_open = pos.qty > EPS
             out.append(
@@ -178,7 +186,7 @@ class PortfolioAnalytics:
                     "taxes": pos.taxes,
                     "total_pnl": unrealized + pos.realized_pnl + pos.income + pos.amortization,
                     "day_change": day_change,
-                    "day_change_pct": f(quote.change_pct) / 100 if quote and quote.change_pct else None,
+                    "day_change_pct": day_change_pct,
                     "quote_updated_at": quote.updated_at.isoformat() if quote else None,
                     "quote_delayed": quote.is_delayed if quote else None,
                     "has_market_price": has_price,
@@ -382,6 +390,64 @@ class PortfolioAnalytics:
             if data.get(key):
                 data[key] = data[key].isoformat()
         return data
+
+    # ------------------------------------------------- симуляция Монте-Карло
+
+    async def monte_carlo(
+        self, period: str = "ALL", horizon: str = "1Y", simulations: int = 1000
+    ) -> dict:
+        """Сценарный прогноз стоимости портфеля на выбранный горизонт.
+
+        Опирается на дневные доходности TWR за историческое окно: пополнения
+        и выводы уже исключены, поэтому распределение отражает именно рыночный
+        результат, а не размер взносов. Это не предсказание, а диапазон
+        правдоподобных исходов при сохранении текущей структуры портфеля.
+        """
+        first = self.ledger.start_date
+        if first is None:
+            return {"available": False, "reason": "нет сделок"}
+
+        start = period_start(period, first) or first
+        end = date.today()
+        baseline, points = await self.valuation_with_baseline(start, end)
+        if len(points) < 2:
+            return {"available": False, "reason": "недостаточно истории"}
+
+        series = m.twr_returns(points, opening_value=baseline)
+        horizon = (horizon or "1Y").upper()
+        horizon_days = m.MC_HORIZONS.get(horizon, m.MC_HORIZONS["1Y"])
+        forecast = m.monte_carlo_forecast(
+            series.daily,
+            points[-1].total,
+            horizon_days,
+            simulations=simulations,
+        )
+        if forecast is None:
+            return {
+                "available": False,
+                "reason": (
+                    "для симуляции нужно не меньше "
+                    f"{m.MIN_MONTE_CARLO_OBSERVATIONS} торговых дней истории "
+                    "и ненулевая стоимость портфеля"
+                ),
+            }
+
+        dates = _future_business_days(end, horizon_days)
+        for point in forecast["points"]:
+            day = point["day"]
+            point["date"] = end.isoformat() if day == 0 else dates[day - 1].isoformat()
+
+        forecast.update(
+            {
+                "available": True,
+                "period": period,
+                "horizon": horizon,
+                "method": "бутстрэп исторических дневных доходностей TWR",
+                "start": points[0].day.isoformat(),
+                "end": end.isoformat(),
+            }
+        )
+        return forecast
 
     # ------------------------------------------------------- корреляция активов
 
@@ -831,6 +897,17 @@ class PortfolioAnalytics:
 
     def open_quantities(self) -> dict[int, float]:
         return {aid: p.qty for aid, p in self.ledger.positions.items() if p.qty > EPS}
+
+
+def _future_business_days(start: date, count: int) -> list[date]:
+    """Будущие рабочие дни: выходные пропускаем, праздники не учитываем."""
+    days: list[date] = []
+    cursor = start
+    while len(days) < count:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            days.append(cursor)
+    return days
 
 
 def _returns_on_grid(

@@ -77,6 +77,22 @@ async def metrics_all_periods(
     return out
 
 
+@router.get("/monte-carlo", summary="Симуляция Монте-Карло для портфеля")
+async def monte_carlo(
+    db: DB,
+    portfolio_id: PortfolioIds = None,
+    period: str = PeriodQuery,
+    horizon: str = Query("1Y", description="1M, 3M, 6M, 1Y или 3Y"),
+    simulations: int = Query(
+        1000, ge=100, le=5000, description="Сколько сценариев генерировать"
+    ),
+):
+    analytics = await PortfolioAnalytics.load(db, portfolio_id)
+    return await analytics.monte_carlo(
+        period=period, horizon=horizon, simulations=simulations
+    )
+
+
 @router.get("/correlation", summary="Матрица корреляций активов")
 async def correlation(
     db: DB,

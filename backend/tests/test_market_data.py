@@ -6,7 +6,10 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.market_data import quote_for_date
+from app.services.moex import MoexISS
 
 
 class _Result:
@@ -81,3 +84,45 @@ def test_quote_for_date_skips_custom_assets():
     )
 
     assert quote["price"] is None
+
+
+def test_market_data_uses_last_trade_price_as_previous_close():
+    payload = {
+        "securities": {
+            "columns": [
+                "SECID",
+                "PREVPRICE",
+                "PREVLEGALCLOSEPRICE",
+                "ACCRUEDINT",
+                "FACEVALUE",
+            ],
+            "data": [
+                ["SBER", 287.74, 287.10, None, 3],
+                ["SU26238RMFS4", 50.624, 50.551, 33.84, 1000],
+            ],
+        },
+        "marketdata": {
+            "columns": ["SECID", "LAST", "LASTTOPREVPRICE", "LASTCHANGEPRCNT"],
+            "data": [
+                ["SBER", 286.53, -0.42, 0],
+                ["SU26238RMFS4", 50.602, -0.04, 0],
+            ],
+        },
+    }
+    iss = MoexISS()
+
+    async def fake_get(_path, _params=None):
+        return payload
+
+    iss._get = fake_get
+    data = asyncio.run(
+        iss.market_data("stock", "shares", "TQBR", ["SBER", "SU26238RMFS4"])
+    )
+
+    # PREVPRICE — последняя сделка прошлого дня; PREVLEGALCLOSEPRICE — закрытие
+    assert data["SBER"]["prev_close"] == pytest.approx(287.74)
+    assert data["SU26238RMFS4"]["prev_close"] == pytest.approx(50.624)
+    # LASTCHANGEPRCNT после закрытия равен нулю, поэтому берём LASTTOPREVPRICE
+    assert data["SBER"]["change_pct"] == pytest.approx(-0.42)
+    assert data["SU26238RMFS4"]["change_pct"] == pytest.approx(-0.04)
+    assert data["SU26238RMFS4"]["accrued_interest"] == pytest.approx(33.84)

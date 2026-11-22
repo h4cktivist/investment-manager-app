@@ -225,7 +225,7 @@ class MoexISS:
                 ),
                 "marketdata.columns": (
                     "SECID,LAST,LCLOSEPRICE,LCURRENTPRICE,MARKETPRICE,WAPRICE,BID,OFFER,"
-                    "LASTCHANGEPRCNT,UPDATETIME,VALTODAY,YIELD,DURATION"
+                    "LASTTOPREVPRICE,LASTCHANGEPRCNT,UPDATETIME,VALTODAY,YIELD,DURATION"
                 ),
             },
         )
@@ -241,8 +241,8 @@ class MoexISS:
             if not s and not m:
                 continue
             prev = (
-                _to_float(s.get("PREVLEGALCLOSEPRICE"))
-                or _to_float(s.get("PREVPRICE"))
+                _to_float(s.get("PREVPRICE"))
+                or _to_float(s.get("PREVLEGALCLOSEPRICE"))
                 or _to_float(s.get("PREVADMITTEDQUOTE"))
             )
             last = (
@@ -255,7 +255,9 @@ class MoexISS:
             )
             if last is None:
                 continue
-            change = _to_float(m.get("LASTCHANGEPRCNT"))
+            # LASTCHANGEPRCNT после закрытия сессии обнуляется, а LASTTOPREVPRICE
+            # остаётся изменением к предыдущей цене — именно его показывает брокер
+            change = _to_float(m.get("LASTTOPREVPRICE"))
             if change is None and prev:
                 change = (last / prev - 1) * 100
             result[secid] = {

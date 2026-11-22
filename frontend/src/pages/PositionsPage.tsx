@@ -172,11 +172,19 @@ function PositionRow({
 }: {
   position: Position
   maxValue: number
-  live?: { price_norm: number; change_pct: number | null; updated_at: string; is_delayed: boolean }
+  live?: {
+    price_norm: number
+    accrued_interest: number | null
+    change_pct: number | null
+    updated_at: string
+    is_delayed: boolean
+  }
 }) {
-  // живая котировка из WebSocket перекрывает значение из последнего ответа API
-  const price = live?.price_norm ?? p.last_price
-  const drift = p.quantity * (price - p.last_price)
+  // В котировке price_norm — чистая цена, как у брокера; НКД прибавляем только
+  // к стоимости, иначе при живом тике она «провалится» на размер НКД.
+  const liveDirty = live ? live.price_norm + (live.accrued_interest ?? 0) : p.last_price
+  const price = live?.price_norm ?? p.clean_price
+  const drift = p.quantity * (liveDirty - p.last_price)
   const marketValue = p.market_value + drift
   const unrealized = p.unrealized_pnl + drift
 

@@ -351,6 +351,41 @@ def test_pair_statistics_reports_covariance_and_annual_scale():
     assert stats["covariance_annual"] == pytest.approx(stats["covariance"] * 252)
 
 
+def test_monte_carlo_is_reproducible_and_orders_percentiles():
+    daily = [0.01, -0.02, 0.005, -0.03, 0.02, 0.0, -0.01, 0.015] * 6
+
+    out = m.monte_carlo_forecast(daily, 100_000.0, 63, simulations=400)
+    again = m.monte_carlo_forecast(daily, 100_000.0, 63, simulations=400)
+
+    # фиксированное зерно: один и тот же вход даёт один и тот же прогноз
+    assert out == again
+    assert len(out["points"]) == 64
+    assert out["points"][0]["p50"] == pytest.approx(100_000.0)
+    for point in out["points"]:
+        assert point["p5"] <= point["p25"] <= point["p50"] <= point["p75"] <= point["p95"]
+
+    assert 0.0 <= out["probability_of_loss"] <= 1.0
+    assert out["var_95"] >= 0.0
+    # ES — средний убыток за границей VaR, он не может быть меньше VaR
+    assert out["es_95"] >= out["var_95"]
+    assert out["final"]["min"] <= out["final"]["p5"]
+    assert out["final"]["max"] >= out["final"]["p95"]
+
+
+def test_monte_carlo_with_constant_return_has_no_spread():
+    out = m.monte_carlo_forecast([0.001] * 40, 1000.0, 21, simulations=50)
+
+    assert out["final"]["p5"] == pytest.approx(out["final"]["p95"])
+    assert out["probability_of_loss"] == 0.0
+    assert out["var_95"] == 0.0
+    assert out["median_return"] > 0
+
+
+def test_monte_carlo_requires_history_and_value():
+    assert m.monte_carlo_forecast([0.01] * 10, 1000.0, 21) is None
+    assert m.monte_carlo_forecast([0.01] * 40, 0.0, 21) is None
+
+
 def test_returns_on_grid_forward_fills_and_skips_leading_gap():
     days = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7), date(2026, 1, 8)]
     prices = [(date(2026, 1, 6), 100.0), (date(2026, 1, 8), 110.0)]

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { ReturnComparisonChart } from '../components/charts'
+import MonteCarloPanel from '../components/MonteCarloPanel'
 import { Card, ErrorBox, Money, SegmentedControl, Spinner, StatTile, cx } from '../components/ui'
 import { api, qs, type Performance } from '../lib/api'
 import { fmtDate, pctRaw } from '../lib/format'
@@ -156,6 +157,8 @@ export default function BenchmarksPage() {
               height={360}
             />
           </Card>
+
+          <MonteCarloPanel period={period} />
 
           <div className="grid gap-4 lg:grid-cols-3">
             <Card title="Связь с рынком" className="lg:col-span-1">

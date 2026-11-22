@@ -5,6 +5,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  ComposedChart,
   Line,
   LineChart,
   ReferenceLine,
@@ -16,7 +17,12 @@ import {
 import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import type { AllocationSlice, PerfPoint, BenchmarkSeries } from '../lib/api'
+import type {
+  AllocationSlice,
+  BenchmarkSeries,
+  MonteCarloPoint,
+  PerfPoint,
+} from '../lib/api'
 import { axisMoney, fmtDate, fmtMonth, num, pctRaw, rub, rubShort } from '../lib/format'
 import { CHART_MARGIN, axisProps, seriesColor, useViz } from '../lib/viz'
 import { LegendRow, cx } from './ui'
@@ -246,6 +252,143 @@ export function ReturnComparisonChart({
 
 function shortBenchmark(name: string): string {
   return name.replace('Индекс ', '').replace(', полной доходности', ' (полн. дох.)')
+}
+
+// --------------------------------------------- веер сценариев Монте-Карло
+
+export function MonteCarloChart({
+  points,
+  initialValue,
+  height = 360,
+}: {
+  points: MonteCarloPoint[]
+  initialValue: number
+  height?: number
+}) {
+  const viz = useViz()
+  const data = useMemo(
+    () =>
+      points.map((point) => ({
+        ...point,
+        // полосы строятся стопкой: нижний квантиль + ширина полосы
+        outer: Math.max(point.p95 - point.p5, 0),
+        inner: Math.max(point.p75 - point.p25, 0),
+      })),
+    [points],
+  )
+  if (!data.length) return <ChartEmpty />
+
+  const median = seriesColor(viz, 0)
+  const band = seriesColor(viz, 4)
+
+  return (
+    <>
+      <ResponsiveContainer width="100%" height={height}>
+        <ComposedChart data={data} margin={{ ...CHART_MARGIN, right: 16 }}>
+          <CartesianGrid stroke={viz.grid} vertical={false} />
+          <XAxis
+            dataKey="date"
+            tickFormatter={(value) => fmtDate(String(value)).slice(3)}
+            minTickGap={48}
+            {...axisProps(viz)}
+          />
+          <YAxis
+            tickFormatter={axisMoney}
+            width={52}
+            domain={['auto', 'auto']}
+            {...axisProps(viz)}
+          />
+          <Tooltip
+            cursor={{ stroke: viz.axis, strokeWidth: 1 }}
+            content={({ active, payload }) => {
+              if (!active || !payload?.length) return null
+              const row = payload[0].payload as MonteCarloPoint
+              return (
+                <TooltipShell title={fmtDate(row.date)}>
+                  <TooltipRow
+                    color={median}
+                    label="Медиана"
+                    value={`${rub(row.p50, 0)} · ${pctRaw((row.p50 / initialValue - 1) * 100)}`}
+                  />
+                  <TooltipRow
+                    color={band}
+                    label="25–75% сценариев"
+                    value={`${rub(row.p25, 0)} – ${rub(row.p75, 0)}`}
+                  />
+                  <TooltipRow
+                    color={band}
+                    label="5–95% сценариев"
+                    value={`${rub(row.p5, 0)} – ${rub(row.p95, 0)}`}
+                  />
+                </TooltipShell>
+              )
+            }}
+          />
+          <Area
+            dataKey="p5"
+            stackId="outer"
+            stroke="none"
+            fill="transparent"
+            isAnimationActive={false}
+          />
+          <Area
+            dataKey="outer"
+            stackId="outer"
+            stroke="none"
+            fill={band}
+            fillOpacity={0.1}
+            isAnimationActive={false}
+          />
+          <Area
+            dataKey="p25"
+            stackId="inner"
+            stroke="none"
+            fill="transparent"
+            isAnimationActive={false}
+          />
+          <Area
+            dataKey="inner"
+            stackId="inner"
+            stroke="none"
+            fill={band}
+            fillOpacity={0.2}
+            isAnimationActive={false}
+          />
+          <ReferenceLine
+            y={initialValue}
+            stroke={viz.muted}
+            strokeDasharray="4 3"
+            strokeWidth={1}
+            ifOverflow="extendDomain"
+          />
+          <Line
+            type="monotone"
+            dataKey="p50"
+            stroke={median}
+            strokeWidth={2.5}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+
+      <LegendRow
+        items={[
+          { color: median, label: 'Медиана' },
+          {
+            color: `color-mix(in srgb, ${band} 35%, transparent)`,
+            label: '50% сценариев (25–75%)',
+          },
+          {
+            color: `color-mix(in srgb, ${band} 18%, transparent)`,
+            label: '90% сценариев (5–95%)',
+          },
+          { color: viz.muted, label: 'Стартовая стоимость' },
+        ]}
+      />
+    </>
+  )
 }
 
 // -------------------------------------------------------- распределение
