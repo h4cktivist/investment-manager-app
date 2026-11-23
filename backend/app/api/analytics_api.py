@@ -5,7 +5,7 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import DB, PortfolioIds
 from app.config import settings
-from app.services.analytics import PortfolioAnalytics
+from app.services.analytics import PortfolioAnalytics, correlation_pair
 from app.services.macro import macro_snapshot
 from app.services.portfolio import upcoming_payments_for_holdings
 
@@ -91,6 +91,16 @@ async def monte_carlo(
     return await analytics.monte_carlo(
         period=period, horizon=horizon, simulations=simulations
     )
+
+
+@router.get("/correlation/pair", summary="Корреляция двух произвольных активов")
+async def correlation_pair_endpoint(
+    db: DB,
+    left: str = Query(min_length=1, description="Тикер первого актива"),
+    right: str = Query(min_length=1, description="Тикер второго актива"),
+    period: str = PeriodQuery,
+):
+    return await correlation_pair(db, left, right, period=period)
 
 
 @router.get("/correlation", summary="Матрица корреляций активов")

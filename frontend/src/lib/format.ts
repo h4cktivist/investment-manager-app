@@ -34,6 +34,26 @@ export function pctRaw(value: number | null | undefined, digits = 2): string {
   return `${num4.format(Number(value.toFixed(digits)))} %`
 }
 
+const twoDigits = new Intl.NumberFormat('ru-RU', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+
+/** Корреляция (0.42) → «+0,42», (−0.42) → «−0,42». */
+export function signedNumber(value: number): string {
+  const sign = value > 0 ? '+' : value < 0 ? '−' : ''
+  return `${sign}${twoDigits.format(Math.abs(value))}`
+}
+
+/** Словесная сила связи по модулю корреляции. */
+export function correlationStrength(value: number): string {
+  const absolute = Math.abs(value)
+  if (absolute >= 0.7) return value > 0 ? 'сильная положительная' : 'сильная отрицательная'
+  if (absolute >= 0.4) return value > 0 ? 'умеренная положительная' : 'умеренная отрицательная'
+  if (absolute >= 0.15) return value > 0 ? 'слабая положительная' : 'слабая отрицательная'
+  return 'связи почти нет'
+}
+
 export function signed(value: number | null | undefined, fn = rub): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   const text = fn(Math.abs(value))

@@ -8,6 +8,7 @@ import {
   type BondsResponse,
   type CalendarResponse,
   type CorrelationMatrix,
+  type CorrelationPairResult,
   type Dashboard,
   type Metrics,
   type MonteCarlo,
@@ -99,6 +100,18 @@ export function useCorrelationMatrix(period: string, maxAssets = 15) {
           max_assets: maxAssets,
         })}`,
       ),
+  })
+}
+
+/** Корреляция двух любых бумаг: не обязательно из портфеля. */
+export function useCorrelationPair(left: string, right: string, period: string) {
+  return useQuery({
+    queryKey: ['correlation-pair', left, right, period],
+    queryFn: () =>
+      api.get<CorrelationPairResult>(
+        `/portfolio/correlation/pair${qs({ left, right, period })}`,
+      ),
+    enabled: Boolean(left && right && left !== right),
   })
 }
 

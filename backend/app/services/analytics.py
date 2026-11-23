@@ -22,7 +22,7 @@ from app.models import (
 )
 from app.services.portfolio import upcoming_payments_for_holdings
 from app.services import bond_math, metrics as m
-from app.services.moex import normalize_price
+from app.services.moex import MoexISS, normalize_price
 from app.services.portfolio import (
     EPS,
     LedgerResult,
@@ -986,3 +986,271 @@ async def portfolio_list_with_values(session: AsyncSession) -> list[dict]:
             }
         )
     return out
+
+
+# --------------------------------------------- корреляция произвольной пары
+
+#: для «всего времени» по бумаге вне портфеля тянуть больше двух лет тяжело
+PAIR_HISTORY_DAYS = 365 * 2
+
+
+def _asset_meta(asset: Asset) -> dict:
+    name = asset.short_name or asset.name
+    return {
+        "secid": asset.secid,
+        "name": name,
+        "asset_class": asset.asset_class,
+        "asset_class_label": ASSET_CLASS_LABELS.get(asset.asset_class, asset.asset_class),
+    }
+
+
+def _info_meta(secid: str, info: dict) -> dict:
+    asset_class = info.get("asset_class") or "SHARE"
+    return {
+        "secid": secid,
+        "name": info.get("short_name") or info.get("name") or secid,
+        "asset_class": asset_class,
+        "asset_class_label": ASSET_CLASS_LABELS.get(asset_class, asset_class),
+    }
+
+
+async def _pair_series(
+    session: AsyncSession,
+    secid: str,
+    start: date | None,
+    end: date,
+    iss: MoexISS,
+) -> tuple[dict, list[tuple[date, float]], str | None]:
+    """Цены одного актива: из локальной истории, при нехватке — из ISS."""
+    asset = await session.scalar(select(Asset).where(Asset.secid == secid))
+    points: list[tuple[date, float]] = []
+    meta: dict = {}
+
+    if asset is not None:
+        meta = _asset_meta(asset)
+        if asset.is_custom:
+            return meta, [], f"по активу {secid} нет рыночной истории — это кастомный актив"
+        stmt = select(PriceHistory.date, PriceHistory.close_norm).where(
+            PriceHistory.asset_id == asset.id,
+            PriceHistory.date <= end,
+        )
+        if start is not None:
+            stmt = stmt.where(PriceHistory.date >= start)
+        rows = await session.execute(stmt.order_by(PriceHistory.date))
+        points = [
+            (day, f(close))
+            for day, close in rows
+            if close is not None and f(close) > EPS
+        ]
+        if len(points) >= CORRELATION_MIN_RETURNS + 1:
+            return meta, points, None
+
+    if asset is None:
+        info = await iss.security_info(secid)
+        if not info:
+            return {}, [], f"инструмент {secid} не найден на Мосбирже"
+        meta = _info_meta(secid, info)
+        engine = info.get("engine")
+        market = info.get("market")
+        board = info.get("board")
+        asset_class = info.get("asset_class") or "SHARE"
+        face = info.get("face_value") or info.get("initial_face_value")
+    else:
+        engine, market, board = asset.engine, asset.market, asset.board
+        asset_class = asset.asset_class
+        face = asset.face_value or asset.initial_face_value
+
+    if not engine or not market:
+        return meta, points, f"по активу {secid} неизвестен режим торгов"
+
+    history_start = start or (end - timedelta(days=PAIR_HISTORY_DAYS))
+    try:
+        rows = await iss.history(engine, market, secid, history_start, end, board=board)
+        if not rows and board:
+            rows = await iss.history(engine, market, secid, history_start, end)
+    except Exception as exc:  # noqa: BLE001 — ISS может быть недоступен
+        log.warning("correlation_pair history(%s): %s", secid, exc)
+        rows = []
+
+    merged = dict(points)
+    for row in rows:
+        face_row = row.get("face_value") or face
+        value = normalize_price(
+            asset_class,
+            row["close"],
+            float(face_row) if face_row else None,
+        )
+        if value > EPS:
+            merged[row["date"]] = value
+    points = sorted(merged.items())
+
+    if len(points) < CORRELATION_MIN_RETURNS + 1:
+        return meta, points, f"по активу {secid} недостаточно истории цен"
+    return meta, points, None
+
+
+async def _pair_grid(
+    session: AsyncSession,
+    start: date,
+    end: date,
+    points: list[tuple[date, float]],
+) -> list[date]:
+    """Общая сетка торговых дней; при отсутствии IMOEX — даты самих бумаг."""
+    rows = await session.execute(
+        select(BenchmarkPrice.date)
+        .join(Benchmark, Benchmark.id == BenchmarkPrice.benchmark_id)
+        .where(
+            Benchmark.code == "IMOEX",
+            BenchmarkPrice.date >= start,
+            BenchmarkPrice.date <= end,
+        )
+    )
+    grid = sorted({row[0] for row in rows})
+    if len(grid) < CORRELATION_MIN_RETURNS + 1:
+        grid = sorted({day for day, _ in points if start <= day <= end})
+    return grid
+
+
+def _build_pair_result(
+    left_meta: dict,
+    right_meta: dict,
+    left_points: list[tuple[date, float]],
+    right_points: list[tuple[date, float]],
+    grid: list[date],
+    start: date | None,
+    period: str,
+) -> dict:
+    """Считает доходности на общей сетке и собирает ответ для пары."""
+    left_series = _returns_on_grid(left_points, grid)
+    right_series = _returns_on_grid(right_points, grid)
+    if start is not None:
+        left_series = [(day, value) for day, value in left_series if day >= start]
+        right_series = [(day, value) for day, value in right_series if day >= start]
+
+    for meta, series in ((left_meta, left_series), (right_meta, right_series)):
+        if len(series) < CORRELATION_MIN_RETURNS:
+            return {
+                "available": False,
+                "period": period,
+                "reason": (
+                    f"по активу {meta.get('secid', '')} меньше "
+                    f"{CORRELATION_MIN_RETURNS} торговых дней с доходностью"
+                ),
+            }
+
+    left_map = dict(left_series)
+    right_map = dict(right_series)
+    common = sorted(set(left_map) & set(right_map))
+    if len(common) < CORRELATION_MIN_RETURNS:
+        return {
+            "available": False,
+            "period": period,
+            "reason": (
+                "у бумаг слишком мало общих торговых дней: "
+                f"{len(common)} при минимуме {CORRELATION_MIN_RETURNS}"
+            ),
+        }
+
+    stats = m.pair_statistics(
+        [left_map[day] for day in common],
+        [right_map[day] for day in common],
+    )
+    if stats is None:
+        return {
+            "available": False,
+            "period": period,
+            "reason": "у одной из бумаг нулевая волатильность за период",
+        }
+
+    def detail(meta: dict, series: list[tuple[date, float]]) -> dict:
+        return {
+            **meta,
+            "observations": len(series),
+            "volatility": m.volatility([value for _, value in series]),
+            "first": series[0][0].isoformat() if series else None,
+            "last": series[-1][0].isoformat() if series else None,
+        }
+
+    return {
+        "available": True,
+        "period": period,
+        "start": common[0].isoformat(),
+        "end": common[-1].isoformat(),
+        "requested_start": start.isoformat() if start else None,
+        "method": "дневные доходности чистых цен на общей сетке торговых дней",
+        "left": detail(left_meta, left_series),
+        "right": detail(right_meta, right_series),
+        "correlation": stats["correlation"],
+        "covariance": stats["covariance"],
+        "covariance_annual": stats["covariance_annual"],
+        "covariance_pct2": stats["covariance"] * 10_000,
+        "covariance_annual_pct2": stats["covariance_annual"] * 10_000,
+        "observations": stats["observations"],
+        "min_observations": CORRELATION_MIN_RETURNS,
+    }
+
+
+async def correlation_pair(
+    session: AsyncSession,
+    left_secid: str,
+    right_secid: str,
+    period: str = "ALL",
+) -> dict:
+    """Корреляция двух любых активов, не обязательно входящих в портфель.
+
+    Цены берутся из локальной истории, а для бумаг вне портфеля — напрямую
+    из ISS. Считаются дневные доходности чистых цен на общей сетке торговых
+    дней, поэтому результат совпадает с ячейкой матрицы для тех же бумаг.
+    """
+    left_code = (left_secid or "").strip().upper()
+    right_code = (right_secid or "").strip().upper()
+    if not left_code or not right_code:
+        return {"available": False, "reason": "укажите два тикера"}
+    if left_code == right_code:
+        return {"available": False, "reason": "нужны две разные бумаги"}
+
+    end = date.today()
+    requested_start = period_start(period, None)
+    fetch_start = (
+        requested_start - timedelta(days=CORRELATION_LOOKBACK_DAYS)
+        if requested_start
+        else None
+    )
+
+    async with MoexISS() as iss:
+        left_meta, left_points, left_error = await _pair_series(
+            session, left_code, fetch_start, end, iss
+        )
+        right_meta, right_points, right_error = await _pair_series(
+            session, right_code, fetch_start, end, iss
+        )
+
+    if left_error:
+        return {"available": False, "period": period, "reason": left_error}
+    if right_error:
+        return {"available": False, "period": period, "reason": right_error}
+    if not left_points or not right_points:
+        return {
+            "available": False,
+            "period": period,
+            "reason": "нет истории цен за выбранный период",
+        }
+
+    grid_start = fetch_start or min(day for day, _ in left_points + right_points)
+    grid = await _pair_grid(session, grid_start, end, left_points + right_points)
+    if not grid:
+        return {
+            "available": False,
+            "period": period,
+            "reason": "нет торговых дней за выбранный период",
+        }
+
+    return _build_pair_result(
+        left_meta,
+        right_meta,
+        left_points,
+        right_points,
+        grid,
+        requested_start,
+        period,
+    )

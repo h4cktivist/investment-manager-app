@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 
 import type { CorrelationAsset, CorrelationMatrix, CorrelationPair } from '../lib/api'
-import { fmtDate, pct } from '../lib/format'
+import { correlationStrength, fmtDate, pct, signedNumber } from '../lib/format'
 import { cx } from './ui'
 
 //: те же смысловые цвета, что в остальном интерфейсе:
@@ -37,19 +37,6 @@ function heatText(value: number | null): string {
   return value === null || !Number.isFinite(value)
     ? 'var(--text-muted)'
     : 'var(--text-primary)'
-}
-
-function signedNumber(value: number): string {
-  const sign = value > 0 ? '+' : value < 0 ? '−' : ''
-  return `${sign}${twoDigits.format(Math.abs(value))}`
-}
-
-function strengthLabel(value: number): string {
-  const absolute = Math.abs(value)
-  if (absolute >= 0.7) return value > 0 ? 'сильная положительная' : 'сильная отрицательная'
-  if (absolute >= 0.4) return value > 0 ? 'умеренная положительная' : 'умеренная отрицательная'
-  if (absolute >= 0.15) return value > 0 ? 'слабая положительная' : 'слабая отрицательная'
-  return 'связи почти нет'
 }
 
 function pairKey(i: number, j: number): { i: number; j: number } {
@@ -256,7 +243,7 @@ function PairDialog({
             >
               {signedNumber(pair.correlation)}
             </span>
-            <span className="text-xs text-ink-2">{strengthLabel(pair.correlation)}</span>
+            <span className="text-xs text-ink-2">{correlationStrength(pair.correlation)}</span>
           </div>
         </div>
 

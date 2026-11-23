@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import CorrelationHeatmap from '../components/CorrelationHeatmap'
+import CorrelationPairPanel from '../components/CorrelationPairPanel'
 import { Card, ErrorBox, Spinner, StatTile, cx } from '../components/ui'
 import { useAllPeriodMetrics, useCorrelationMatrix, useMetrics } from '../hooks/useApi'
 import type { Metrics } from '../lib/api'
@@ -194,22 +195,31 @@ export default function MetricsPage() {
         </p>
       </section>
 
-      <Card
-        title="Корреляция активов"
-        subtitle="Попарная корреляция дневных доходностей за выбранный период. Нажмите на ячейку, чтобы увидеть детали."
-      >
-        {correlations.isLoading ? (
-          <Spinner />
-        ) : correlations.error ? (
-          <ErrorBox error={correlations.error} />
-        ) : !correlations.data?.available ? (
-          <p className="text-sm text-ink-2">
-            {correlations.data?.reason ?? 'Недостаточно данных для матрицы корреляций'}
-          </p>
-        ) : (
-          <CorrelationHeatmap data={correlations.data} />
-        )}
-      </Card>
+      <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <Card
+          title="Корреляция активов"
+          subtitle="Попарная корреляция дневных доходностей за выбранный период. Нажмите на ячейку, чтобы увидеть детали."
+        >
+          {correlations.isLoading ? (
+            <Spinner />
+          ) : correlations.error ? (
+            <ErrorBox error={correlations.error} />
+          ) : !correlations.data?.available ? (
+            <p className="text-sm text-ink-2">
+              {correlations.data?.reason ?? 'Недостаточно данных для матрицы корреляций'}
+            </p>
+          ) : (
+            <CorrelationHeatmap data={correlations.data} />
+          )}
+        </Card>
+
+        <Card
+          title="Корреляция двух активов"
+          subtitle="Любые бумаги Мосбиржи — не обязательно из портфеля."
+        >
+          <CorrelationPairPanel />
+        </Card>
+      </div>
 
       <Card title="Сравнение по периодам" subtitle="Одни и те же метрики на разных горизонтах">
         {allPeriods.isLoading ? (

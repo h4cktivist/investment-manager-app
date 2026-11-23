@@ -325,6 +325,39 @@ export interface CorrelationMatrix {
   min_observations?: number
 }
 
+export interface CorrelationPairAsset {
+  secid: string
+  name: string
+  asset_class: string
+  asset_class_label: string
+  /** число дневных доходностей за период */
+  observations: number
+  /** годовая волатильность, доля */
+  volatility: number
+  first: string | null
+  last: string | null
+}
+
+export interface CorrelationPairResult {
+  available: boolean
+  reason?: string
+  period?: string
+  /** начало и конец общей истории пары */
+  start?: string
+  end?: string
+  requested_start?: string | null
+  method?: string
+  left?: CorrelationPairAsset
+  right?: CorrelationPairAsset
+  correlation?: number
+  covariance?: number
+  covariance_annual?: number
+  covariance_pct2?: number
+  covariance_annual_pct2?: number
+  observations?: number
+  min_observations?: number
+}
+
 export interface BondItem {
   asset_id: number
   secid: string
