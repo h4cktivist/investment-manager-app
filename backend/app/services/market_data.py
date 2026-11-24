@@ -54,15 +54,21 @@ async def get_or_create_asset(
     """Находит инструмент в БД, при отсутствии — заводит по данным ISS."""
     secid = secid.strip().upper()
     asset = await session.scalar(select(Asset).where(Asset.secid == secid))
-    if asset is not None:
-        return asset
 
+    # Заглушка могла появиться, когда ISS был недоступен (например, из-за
+    # ошибки TLS). Пробуем «дочинить» её, как только связь восстановилась.
     info = None
-    if iss is not None:
+    if iss is not None and (asset is None or is_unresolved(asset)):
         try:
             info = await iss.security_info(secid)
         except Exception as exc:  # noqa: BLE001 — ISS может быть недоступен
             log.warning("ISS security_info(%s) failed: %s", secid, exc)
+
+    if asset is not None:
+        if info is not None:
+            apply_iss_reference(asset, info)
+            await session.flush()
+        return asset
 
     if info is None:
         # инструмент неизвестен бирже — заводим заглушку, пользователь дополнит руками
@@ -78,34 +84,51 @@ async def get_or_create_asset(
         await session.flush()
         return asset
 
-    asset = Asset(
-        secid=secid,
-        name=info["name"],
-        short_name=info.get("short_name"),
-        asset_class=info["asset_class"],
-        currency=info.get("currency") or "RUB",
-        engine=info.get("engine"),
-        market=info.get("market"),
-        board=info.get("board"),
-        isin=info.get("isin"),
-        lot_size=info.get("lot_size") or 1,
-        face_value=_dec(info.get("face_value") or info.get("initial_face_value")),
-        initial_face_value=_dec(info.get("initial_face_value")),
-        coupon_rate=_dec(info.get("coupon_rate")),
-        coupon_period=info.get("coupon_period"),
-        maturity_date=info.get("maturity_date"),
-        offer_date=info.get("offer_date"),
-        is_active=bool(info.get("is_traded", True)),
-        meta={"iss_type": info.get("type"), "iss_group": info.get("group")},
-    )
+    asset = Asset(secid=secid, name=info.get("name") or secid)
+    apply_iss_reference(asset, info)
     session.add(asset)
     await session.flush()
     return asset
 
 
+def is_unresolved(asset: Asset) -> bool:
+    """Заглушка, созданная при недоступном ISS: настоящая карточка ещё не загружена."""
+    return bool(asset.is_custom and (asset.meta or {}).get("unresolved"))
+
+
+def apply_iss_reference(asset: Asset, info: dict) -> None:
+    """Заполняет карточку инструмента по ответу ISS.
+
+    Если это была заглушка, она становится обычным биржевым активом.
+    """
+    asset.name = info.get("name") or asset.name
+    asset.short_name = info.get("short_name") or asset.short_name
+    asset.asset_class = info.get("asset_class") or asset.asset_class or AssetClass.SHARE.value
+    asset.currency = info.get("currency") or asset.currency or "RUB"
+    asset.engine = info.get("engine") or asset.engine
+    asset.market = info.get("market") or asset.market
+    asset.board = info.get("board") or asset.board
+    asset.isin = info.get("isin") or asset.isin
+    asset.lot_size = info.get("lot_size") or asset.lot_size or 1
+    asset.initial_face_value = _dec(info.get("initial_face_value")) or asset.initial_face_value
+    asset.face_value = _dec(info.get("face_value")) or asset.face_value or asset.initial_face_value
+    asset.coupon_rate = _dec(info.get("coupon_rate")) or asset.coupon_rate
+    asset.coupon_period = info.get("coupon_period") or asset.coupon_period
+    asset.maturity_date = info.get("maturity_date") or asset.maturity_date
+    asset.offer_date = info.get("offer_date") or asset.offer_date
+    asset.is_active = bool(info.get("is_traded", True))
+    asset.is_custom = False
+
+    meta = dict(asset.meta or {})
+    meta.pop("unresolved", None)
+    meta["iss_type"] = info.get("type")
+    meta["iss_group"] = info.get("group")
+    asset.meta = meta
+
+
 async def refresh_asset_reference(session: AsyncSession, asset: Asset, iss: MoexISS) -> None:
     """Обновляет справочные поля инструмента (номинал, дата погашения и т.п.)."""
-    if asset.is_custom:
+    if asset.is_custom and not is_unresolved(asset):
         return
     try:
         info = await iss.security_info(asset.secid)
@@ -114,22 +137,7 @@ async def refresh_asset_reference(session: AsyncSession, asset: Asset, iss: Moex
         return
     if not info:
         return
-    asset.name = info["name"] or asset.name
-    asset.short_name = info.get("short_name") or asset.short_name
-    asset.asset_class = info["asset_class"]
-    asset.currency = info.get("currency") or asset.currency
-    asset.engine = info.get("engine") or asset.engine
-    asset.market = info.get("market") or asset.market
-    asset.board = info.get("board") or asset.board
-    asset.isin = info.get("isin") or asset.isin
-    asset.lot_size = info.get("lot_size") or asset.lot_size
-    asset.initial_face_value = _dec(info.get("initial_face_value")) or asset.initial_face_value
-    asset.face_value = _dec(info.get("face_value")) or asset.face_value or asset.initial_face_value
-    asset.coupon_rate = _dec(info.get("coupon_rate")) or asset.coupon_rate
-    asset.coupon_period = info.get("coupon_period") or asset.coupon_period
-    asset.maturity_date = info.get("maturity_date") or asset.maturity_date
-    asset.offer_date = info.get("offer_date") or asset.offer_date
-    asset.is_active = bool(info.get("is_traded", True))
+    apply_iss_reference(asset, info)
 
 
 # ---------------------------------------------------------------- история цен

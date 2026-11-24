@@ -9,6 +9,7 @@ from app.models import Asset, Benchmark
 from app.schemas import SyncRequest, SyncResult
 from app.services.market_data import (
     ensure_benchmarks,
+    is_unresolved,
     refresh_asset_reference,
     sync_benchmark_history,
     sync_payment_schedule,
@@ -29,10 +30,15 @@ async def run_sync(payload: SyncRequest, db: DB):
     await ensure_benchmarks(db)
     await db.commit()
 
-    stmt = select(Asset).where(Asset.is_custom.is_(False))
+    stmt = select(Asset)
     if payload.secids:
         stmt = stmt.where(Asset.secid.in_([s.upper() for s in payload.secids]))
-    assets = list((await db.scalars(stmt)).all())
+    # обычные биржевые активы + заглушки, которые появились при недоступном ISS
+    assets = [
+        asset
+        for asset in (await db.scalars(stmt)).all()
+        if not asset.is_custom or is_unresolved(asset)
+    ]
 
     async with MoexISS() as iss:
         for asset in assets:

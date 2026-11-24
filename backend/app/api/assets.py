@@ -1,3 +1,4 @@
+import logging
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -15,12 +16,16 @@ from app.schemas import (
     CustomAssetCreate,
 )
 from app.services.market_data import (
+    apply_iss_reference,
+    is_unresolved,
     quote_for_date,
     refresh_asset_reference,
     sync_payment_schedule,
     sync_price_history,
 )
 from app.services.moex import MoexISS
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/assets", tags=["Активы"])
 
@@ -68,31 +73,47 @@ async def asset_quote(
     """Чистая цена и НКД за единицу — для автозаполнения формы сделки.
 
     Инструмент может ещё не быть в базе: тогда справочник берётся из ISS,
-    но запись в БД не создаётся — это делает только сохранение сделки.
+    но новая запись в БД не создаётся — это делает только сохранение сделки.
+    Заглушка, заведённая при недоступном ISS, чинится на месте.
     """
     code = secid.strip().upper()
     asset = await db.scalar(select(Asset).where(Asset.secid == code))
 
     async with MoexISS() as iss:
-        if asset is None:
-            info = await iss.security_info(code)
+        view = asset
+        if asset is None or is_unresolved(asset):
+            try:
+                info = await iss.security_info(code)
+            except Exception as exc:  # noqa: BLE001 — ISS может быть недоступен
+                log.warning("security_info(%s): %s", code, exc)
+                info = None
+
             if info is None:
-                raise not_found("Актив")
-            view = SimpleNamespace(
-                id=0,
-                secid=code,
-                name=info.get("name") or code,
-                short_name=info.get("short_name"),
-                asset_class=info.get("asset_class") or AssetClass.SHARE.value,
-                engine=info.get("engine"),
-                market=info.get("market"),
-                board=info.get("board"),
-                face_value=info.get("face_value"),
-                initial_face_value=info.get("initial_face_value"),
-                is_custom=False,
-            )
-        else:
-            view = asset
+                if asset is None:
+                    raise not_found("Актив")
+            elif asset is None:
+                view = SimpleNamespace(
+                    id=0,
+                    secid=code,
+                    name=info.get("name") or code,
+                    short_name=info.get("short_name"),
+                    asset_class=info.get("asset_class") or AssetClass.SHARE.value,
+                    engine=info.get("engine"),
+                    market=info.get("market"),
+                    board=info.get("board"),
+                    face_value=info.get("face_value"),
+                    initial_face_value=info.get("initial_face_value"),
+                    is_custom=False,
+                )
+            else:
+                # Заглушка появилась, когда ISS был недоступен. Чиним карточку,
+                # чтобы цена и НКД подтягивались и в следующий раз.
+                apply_iss_reference(asset, info)
+                try:
+                    await db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    await db.rollback()
+                    log.warning("не удалось сохранить карточку %s: %s", code, exc)
 
         quote = await quote_for_date(db, view, when, iss=iss)
 

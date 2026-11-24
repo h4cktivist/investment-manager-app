@@ -29,6 +29,7 @@ from xml.etree import ElementTree as ET
 import httpx
 
 from app.config import settings
+from app.services.tls import external_ssl_context
 
 log = logging.getLogger(__name__)
 
@@ -462,6 +463,7 @@ async def _load_macro() -> dict:
     async with httpx.AsyncClient(
         timeout=settings.http_timeout,
         headers={"User-Agent": "investment-manager/1.0"},
+        verify=external_ssl_context(),
     ) as client:
         results = await asyncio.gather(
             _fetch_key_rate(client),

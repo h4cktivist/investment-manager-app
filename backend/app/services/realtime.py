@@ -25,6 +25,7 @@ from app.db import SessionLocal
 from app.enums import AssetClass
 from app.models import Asset, Quote
 from app.services.moex import MoexISS, normalize_price
+from app.services.tls import external_ssl_context
 
 log = logging.getLogger(__name__)
 
@@ -162,7 +163,9 @@ class TinvestQuoteProvider:
         if not tradable:
             return {}
         out: dict[str, QuoteTick] = {}
-        async with httpx.AsyncClient(timeout=settings.http_timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=settings.http_timeout, verify=external_ssl_context()
+        ) as client:
             uid_to_asset: dict[str, Asset] = {}
             for asset in tradable:
                 item = await self._resolve(client, asset)

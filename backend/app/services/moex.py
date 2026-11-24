@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 from datetime import date, datetime
 from typing import Any
 
 import httpx
 
 from app.config import settings
+from app.services.tls import external_ssl_context
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +81,25 @@ def _to_date(value: Any) -> date | None:
         return None
 
 
+def _is_tls_error(exc: BaseException) -> bool:
+    """Отличает ошибку проверки сертификата от временного сбоя сети.
+
+    Повторять запрос с тем же недоверенным сертификатом бессмысленно:
+    это только растягивает синхронизацию на десятки секунд.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        text = str(current)
+        if "CERTIFICATE_VERIFY_FAILED" in text or "certificate verify failed" in text:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class MoexISS:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client
@@ -90,6 +111,8 @@ class MoexISS:
             self._client = httpx.AsyncClient(
                 timeout=settings.http_timeout,
                 headers={"User-Agent": "investment-manager/1.0"},
+                # ISS отдаёт сертификат российского УЦ, которого нет в certifi
+                verify=external_ssl_context(),
                 # ISS обрывает соединения при длинных сериях запросов —
                 # держим небольшой пул и переиспользуем его
                 limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
@@ -119,7 +142,8 @@ class MoexISS:
                     resp.raise_for_status()
                     return resp.json()
                 except (httpx.HTTPError, ValueError) as exc:
-                    if attempt == attempts - 1:
+                    # Недоверенный сертификат не «починится» повтором запроса
+                    if _is_tls_error(exc) or attempt == attempts - 1:
                         raise MoexError(f"ISS {path}: {type(exc).__name__} {exc}") from exc
                     await asyncio.sleep(min(0.8 * 2**attempt, 8.0))
         raise MoexError("unreachable")

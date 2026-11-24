@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     moex_iss_base: str = "https://iss.moex.com/iss"
     http_timeout: float = 20.0
 
+    #: Свой CA-bundle для внешних API (корпоративный прокси и т. п.).
+    #: Пусто — certifi + официальный корневой сертификат российского УЦ.
+    ssl_ca_bundle: str = ""
+
     @property
     def cors_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
